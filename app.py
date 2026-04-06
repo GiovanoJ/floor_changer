@@ -207,25 +207,17 @@ if room_file:
                 mask = get_floor_mask(session, room_bgr, conf_threshold=conf_threshold)
 
             if mask is None:
-                st.warning("Lantai tidak terdeteksi. Coba turunkan sensitivitas deteksi.")
+                st.error("Mask None — lantai tidak terdeteksi sama sekali")
             else:
-                with st.spinner("Menerapkan tekstur..."):
-                    result_bgr = apply_texture_perspective(room_bgr, mask, texture_bgr)
-                    result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
-                    result_pil = Image.fromarray(result_rgb)
+                floor_pixels = mask.sum()
+                total_pixels = mask.size
+                pct = floor_pixels / total_pixels * 100
+                st.info(f"Debug: floor pixels = {floor_pixels} / {total_pixels} ({pct:.1f}%)")
+                
+                if floor_pixels == 0:
+                    st.error("Mask ada tapi kosong — semua pixel 0")
+                
+                # Tampilkan mask sebagai gambar
+                mask_visual = (mask * 255).astype(np.uint8)
+                st.image(mask_visual, caption="Mask yang terdeteksi", use_container_width=True)
 
-                st.subheader("Hasil")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(room_img, caption="Original", use_container_width=True)
-                with col2:
-                    st.image(result_pil, caption=f"Tekstur {selected_texture}", use_container_width=True)
-
-                buf = io.BytesIO()
-                result_pil.save(buf, format="JPEG", quality=95)
-                st.download_button(
-                    label="⬇️ Download hasil",
-                    data=buf.getvalue(),
-                    file_name=f"floor_{selected_texture}.jpg",
-                    mime="image/jpeg"
-                )
