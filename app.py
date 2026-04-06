@@ -44,21 +44,31 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     inp = preprocess_image(img_bgr, imgsz)
     outputs = session.run(None, {input_name: inp})
 
+    # DEBUG — tambahkan ini sementara
+    import streamlit as st
+    st.write(f"Jumlah output: {len(outputs)}")
+    for i, o in enumerate(outputs):
+        st.write(f"Output[{i}] shape: {o.shape}")
+
     det_output = outputs[0]
     proto_output = outputs[1]
 
     if len(det_output.shape) == 3:
-        detections = det_output[0]  
+        detections = det_output[0]
     else:
         detections = det_output
 
     if len(proto_output.shape) == 4:
-        proto = proto_output[0] 
+        proto = proto_output[0]
     else:
         proto = proto_output
 
     if proto.shape[0] != 32:
-        proto = proto.transpose(2, 0, 1) 
+        proto = proto.transpose(2, 0, 1)
+
+    # DEBUG deteksi
+    st.write(f"Proto shape setelah fix: {proto.shape}")
+    st.write(f"Detections shape: {detections.shape}")
 
     mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
     found = False
@@ -66,20 +76,26 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     for det in detections:
         if len(det) < 6:
             continue
-
         conf = float(det[4])
         cls = int(det[5])
+
+        # DEBUG tiap deteksi
+        if conf > 0.1:
+            st.write(f"Det: conf={conf:.3f} cls={cls} len={len(det)}")
+
         if conf < conf_threshold or cls != 0:
             continue
 
         found = True
         cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
-        mask_coef = det[6:38]  
-        if mask_coef.shape[0] != 32:
-            continue
+        mask_coef = det[6:38]
+
+        st.write(f"mask_coef shape: {mask_coef.shape}, proto shape: {proto.shape}")
 
         mask = np.einsum('c,chw->hw', mask_coef, proto)
         mask = 1 / (1 + np.exp(-mask))
+
+        st.write(f"mask min={mask.min():.3f} max={mask.max():.3f}")
 
         x1 = int((cx - w / 2) / imgsz * 160)
         y1 = int((cy - h / 2) / imgsz * 160)
@@ -88,9 +104,10 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(160, x2), min(160, y2)
 
+        st.write(f"bbox crop: x1={x1} y1={y1} x2={x2} y2={y2}")
+
         mask_crop = np.zeros((160, 160), dtype=np.float32)
         mask_crop[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
-
         mask_full = cv2.resize(mask_crop, (imgsz, imgsz))
         mask_combined = np.maximum(mask_combined, mask_full)
 
