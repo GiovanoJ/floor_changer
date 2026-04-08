@@ -322,19 +322,8 @@ def apply_ambient_occlusion(img_bgr, mask):
 # FIX BUG 3b: blur_radius 41 → 21, power 1.8 → 2.2 (tepi lebih tajam)
 # =============================================
 def create_feathered_mask(mask, blur_radius=21, power=2.2):
-    binary = (mask > 0).astype(np.uint8)
-
-    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    
-    if dist.max() == 0:
-        return binary.astype(np.float32)
-
-    dist_norm = dist / dist.max()
-    
-    # Power untuk kontrol ketajaman tepi (nilai kecil = transisi lebih lembut)
-    feathered = np.power(dist_norm, 0.5)  # sqrt lebih natural dari power 2.2
-    
-    return feathered.astype(np.float32)
+    # Pakai hard binary mask dulu — kalau ini work, baru tambah feathering
+    return (mask > 0).astype(np.float32)
 
 # =============================================
 # CORE: APPLY TEXTURE
