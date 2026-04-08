@@ -309,6 +309,13 @@ def apply_ambient_occlusion(img_bgr, mask):
     blur_size = kernel_size * 2 - 1
     shadow_map = cv2.GaussianBlur(edge_area.astype(np.float32), (blur_size, blur_size), 0)
 
+    shadow_max = shadow_map.max()
+    if shadow_max > 0:
+        shadow_map = shadow_map / shadow_max
+
+    edge_mask = (edge_area > 0).astype(np.float32)
+    shadow_map = shadow_map * edge_mask
+    
     st.image(shadow_map, caption="Shadow Map", clamp=True)
     st.write("shadow min/max:", shadow_map.min(), shadow_map.max())
     
