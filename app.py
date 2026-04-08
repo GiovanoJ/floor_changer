@@ -282,17 +282,49 @@ def transfer_lighting(original_floor_bgr, texture_warped_bgr, mask):
 # AMBIENT OCCLUSION
 # =============================================
 def apply_ambient_occlusion(img_bgr, mask):
-    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (40, 40))
-    mask_eroded  = cv2.erode(mask, kernel_large)
-    edge_area    = mask - mask_eroded
-
-    shadow_map = cv2.GaussianBlur(edge_area.astype(np.float32), (61, 61), 0)
+    # 1. Pastikan mask formatnya 0 dan 255 (bukan 0 dan 1)
+    # Ini penting agar OpenCV memprosesnya tanpa memunculkan bug/noise
+    mask_255 = (mask * 255).astype(np.uint8) if mask.max() <= 1 else mask.astype(np.uint8)
+    
+    # 2. Bikin ukuran bayangan (kernel) DINAMIS menyesuaikan luas lantai
+    # Cari tahu lebar dan tinggi lantai yang terdeteksi
+    y_idx, x_idx = np.where(mask > 0)
+    if len(y_idx) > 0:
+        h_floor = y_idx.max() - y_idx.min()
+        w_floor = x_idx.max() - x_idx.min()
+        # Ketebalan bayangan = 5% dari sisi terkecil lantai (minimal 11px)
+        kernel_size = max(int(min(w_floor, h_floor) * 0.05), 11)
+        if kernel_size % 2 == 0: kernel_size += 1 # Pastikan ganjil untuk GaussianBlur
+    else:
+        kernel_size = 41
+        
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    mask_eroded  = cv2.erode(mask_255, kernel_large)
+    
+    # 3. Gunakan cv2.subtract (Fix utama untuk hilangkan TV Statik)
+    # cv2.subtract aman dari underflow, nilainya akan di-clip ke 0
+    edge_area = cv2.subtract(mask_255, mask_eroded)
+    
+    # 4. Blur pinggirannya agar gradasi bayangannya halus
+    blur_size = kernel_size * 2 - 1
+    shadow_map = cv2.GaussianBlur(edge_area.astype(np.float32), (blur_size, blur_size), 0)
+    
+    # 5. Normalisasi nilai bayangan (mencegah NaN atau Infinity)
     shadow_max = shadow_map.max()
-    if shadow_max > 0:
-        shadow_map /= shadow_max
-
+    if shadow_max > 0.01:
+        shadow_map = shadow_map / shadow_max
+    else:
+        shadow_map = np.zeros_like(shadow_map)
+        
     shadow_3ch = np.stack([shadow_map] * 3, axis=-1)
-    result     = img_bgr.astype(np.float32) * (1 - 0.18 * shadow_3ch)
+    
+    # 6. Terapkan AO dengan aman (Fix untuk lantai full hitam)
+    shadow_intensity = 0.25  # Angka dinaikkan sedikit biar bayangan pinggir lebih nyata
+    
+    # Hitung faktor penggelapan dan pastikan rentangnya aman di 0.0 sampai 1.0
+    darken_factor = np.clip(1.0 - (shadow_intensity * shadow_3ch), 0.0, 1.0)
+    
+    result = img_bgr.astype(np.float32) * darken_factor
     return np.clip(result, 0, 255).astype(np.uint8)
 
 # =============================================
