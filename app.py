@@ -339,9 +339,9 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
     M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
-    print(f"dst_pts: {dst_pts}")
-    print(f"max_w={max_w}, max_h={max_h}")
-    print(f"det(M)={np.linalg.det(M):.6f}")
+    st.write(f"dst_pts: {dst_pts}")
+    st.write(f"max_w={max_w}, max_h={max_h}")
+    st.write(f"det(M)={np.linalg.det(M):.6f}")
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
 
     mask_3ch       = np.stack([mask] * 3, axis=-1).astype(np.float32) / 1.0
