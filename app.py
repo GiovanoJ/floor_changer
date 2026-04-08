@@ -390,7 +390,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
 
     if texture_warped.max() == 0:
         st.error("texture_warped kosong! Cek dst_pts dan M matrix.")
-    return img_bgr
+        return img_bgr
 
     mask_3ch = np.stack([mask] * 3, axis=-1).astype(np.float32)
     original_floor = (img_bgr.astype(np.float32) * mask_3ch).astype(np.uint8)
@@ -412,10 +412,14 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
 
     cv2.imwrite("debug_3_texture_lit.jpg", texture_lit)
 
-    # =========================
-    # BLENDING
-    # =========================
     alpha = create_feathered_mask(mask, blur_radius=21, power=feather_power)
+
+    st.write(f"alpha min/max: {alpha.min():.6f}, {alpha.max():.6f}")
+    st.write(f"alpha unique values sample: {np.unique(alpha.round(3))[:10]}")
+    st.write(f"mask unique: {np.unique(mask)}")
+    st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
+    st.write(f"img_bgr min/max: {img_bgr_f.min()}, {img_bgr_f.max()}")
+
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
     img_bgr_f    = img_bgr.astype(np.float32)
