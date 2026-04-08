@@ -27,19 +27,20 @@ TEXTURES = {
 }
 
 MAX_FILE_SIZE_MB = 10
-MAX_DIMENSION    = 2048   # Diturunkan dari 4096 → hemat RAM di Streamlit Cloud
+MAX_DIMENSION    = 2048
 ALLOWED_TYPES    = {"jpg", "jpeg", "png"}
-
-# Ukuran tile tekstur dalam piksel (semakin kecil = serat lebih halus)
 TEXTURE_TILE_SIZE = 300
 
+# =============================================
+# MODEL
+# =============================================
 @st.cache_resource
 def load_model():
     if not os.path.exists("best.onnx"):
         st.error("Model best.onnx tidak ditemukan.")
         st.stop()
     sess_options = ort.SessionOptions()
-    sess_options.intra_op_num_threads = 1   # Batasi thread → hemat RAM
+    sess_options.intra_op_num_threads = 1
     sess_options.inter_op_num_threads = 1
     return ort.InferenceSession(
         "best.onnx",
@@ -50,6 +51,9 @@ def load_model():
 session    = load_model()
 input_name = session.get_inputs()[0].name
 
+# =============================================
+# VALIDATION
+# =============================================
 def validate_image(uploaded_file):
     if uploaded_file is None:
         return None, "File tidak ditemukan."
@@ -66,7 +70,6 @@ def validate_image(uploaded_file):
         img  = Image.open(uploaded_file).convert("RGB")
         w, h = img.size
 
-        # Auto-downscale jika melebihi MAX_DIMENSION agar hemat RAM
         if w > MAX_DIMENSION or h > MAX_DIMENSION:
             scale = MAX_DIMENSION / max(w, h)
             img   = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
@@ -90,6 +93,9 @@ def validate_texture(name):
         return None, f"File tekstur {name} tidak bisa dibaca."
     return texture, None
 
+# =============================================
+# PREPROCESSING
+# =============================================
 def preprocess_image(img_bgr, imgsz=640):
     img_resized    = cv2.resize(img_bgr, (imgsz, imgsz))
     img_rgb        = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -97,22 +103,26 @@ def preprocess_image(img_bgr, imgsz=640):
     img_transposed = np.transpose(img_norm, (2, 0, 1))
     return np.expand_dims(img_transposed, axis=0)
 
+# =============================================
+# MASK DETECTION
+# FIX BUG 1: clip mask_raw sebelum sigmoid → hilangkan TV static
+# =============================================
 def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     orig_h, orig_w = img_bgr.shape[:2]
     imgsz = 640
 
-    inp = preprocess_image(img_bgr, imgsz)
+    inp     = preprocess_image(img_bgr, imgsz)
     outputs = session.run(None, {input_name: inp})
 
     detections = outputs[0][0].transpose(1, 0)
-    proto = outputs[1][0]  # (32, 160, 160)
-    
-    best_det = None
+    proto      = outputs[1][0]  # (32, 160, 160)
+
+    best_det  = None
     best_area = 0
 
     for det in detections:
         cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
-        cls_score = float(det[4])
+        cls_score    = float(det[4])
 
         if cls_score < conf_threshold:
             continue
@@ -120,28 +130,24 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
         area = w * h
         if area > best_area:
             best_area = area
-            best_det = det
+            best_det  = det
 
     if best_det is None:
         return None
 
-    # =========================================
-    # 🔥 BUILD MASK DARI DETEKSI TERPILIH
-    # =========================================
     mask_combined = np.zeros((imgsz, imgsz), dtype=np.float32)
 
-    det = best_det
+    det  = best_det
     cx, cy, w, h = float(det[0]), float(det[1]), float(det[2]), float(det[3])
+    mask_coef    = det[5:37]
 
-    mask_coef = det[5:37]
-
+    # ✅ FIX 1: clip mask_raw sebelum sigmoid → cegah TV static
     mask_raw = np.einsum('c,chw->hw', mask_coef, proto)
+    mask_raw = np.clip(mask_raw, -10, 10)          # ← kunci fix TV static
     mask_sig = 1 / (1 + np.exp(-mask_raw))
 
-    # 🔥 smoothing awal (penting)
-    mask_sig = cv2.GaussianBlur(mask_sig, (7,7), 0)
+    mask_sig = cv2.GaussianBlur(mask_sig, (7, 7), 0)
 
-    # bbox ke koordinat proto
     x1 = max(0,   int((cx - w / 2) / imgsz * 160))
     y1 = max(0,   int((cy - h / 2) / imgsz * 160))
     x2 = min(160, int((cx + w / 2) / imgsz * 160))
@@ -150,41 +156,29 @@ def get_floor_mask(session, img_bgr, conf_threshold=0.25):
     if x2 <= x1 or y2 <= y1:
         return None
 
-    mask_crop = np.zeros((160, 160), dtype=np.float32)
+    mask_crop              = np.zeros((160, 160), dtype=np.float32)
     mask_crop[y1:y2, x1:x2] = mask_sig[y1:y2, x1:x2]
 
-    mask_full = cv2.resize(mask_crop, (imgsz, imgsz))
+    mask_full     = cv2.resize(mask_crop, (imgsz, imgsz))
     mask_combined = np.maximum(mask_combined, mask_full)
 
-    # =========================================
-    # 🔥 POST-PROCESSING (ANTI NOISE)
-    # =========================================
-    mask_orig = cv2.resize(mask_combined, (orig_w, orig_h))
-
-    # threshold lebih ketat
+    mask_orig   = cv2.resize(mask_combined, (orig_w, orig_h))
     binary_mask = (mask_orig > 0.65).astype(np.uint8)
 
-    # morphology
     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
     kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
 
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_close)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN,  kernel_open)
-
-    # 🔥 hapus noise kecil
     binary_mask = remove_small_noise(binary_mask, min_area=8000)
-
-    # 🔥 ambil area terbesar
     binary_mask = keep_largest_component(binary_mask)
 
-    # 🔥 smoothing akhir biar ga bergerigi
-    binary_mask = cv2.GaussianBlur(binary_mask.astype(np.float32), (15,15), 0)
+    binary_mask = cv2.GaussianBlur(binary_mask.astype(np.float32), (15, 15), 0)
     binary_mask = (binary_mask > 0.5).astype(np.uint8)
 
     return binary_mask
 
 def keep_largest_component(mask):
-    """Hanya pertahankan area mask terbesar."""
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if num_labels <= 1:
         return mask
@@ -194,30 +188,27 @@ def keep_largest_component(mask):
 def remove_small_noise(mask, min_area=5000):
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     new_mask = np.zeros_like(mask)
-
     for i in range(1, num_labels):
         if stats[i, cv2.CC_STAT_AREA] > min_area:
             new_mask[labels == i] = 1
-
     return new_mask
 
 # =============================================
-# HELPER: TEXTURE TILING
+# TEXTURE TILING
+# FIX BUG 3: gunakan INTER_AREA saat downscale → serat lebih halus
 # =============================================
 def tile_texture(texture_bgr, target_w, target_h, tile_size=TEXTURE_TILE_SIZE):
-    """
-    Tile tekstur ke ukuran target alih-alih meng-stretch.
-    Ini mencegah serat kayu terlihat terlalu tebal/besar.
-    """
-    tex_tile = cv2.resize(texture_bgr, (tile_size, tile_size),
-                          interpolation=cv2.INTER_LANCZOS4)
-    tiles_x  = -(-target_w // tile_size)   # ceiling division
+    # ✅ FIX 3a: pilih interpolasi yang tepat
+    interp   = cv2.INTER_AREA if tile_size < texture_bgr.shape[1] else cv2.INTER_LANCZOS4
+    tex_tile = cv2.resize(texture_bgr, (tile_size, tile_size), interpolation=interp)
+    tiles_x  = -(-target_w // tile_size)
     tiles_y  = -(-target_h // tile_size)
     tiled    = np.tile(tex_tile, (tiles_y, tiles_x, 1))
     return tiled[:target_h, :target_w]
 
 # =============================================
-# HELPER: PERSPECTIVE UTILS
+# PERSPECTIVE UTILS
+# FIX BUG 2: ganti approxPolyDP → 4 extreme points langsung (lebih stabil)
 # =============================================
 def order_points(pts):
     rect    = np.zeros((4, 2), dtype=np.float32)
@@ -231,59 +222,36 @@ def order_points(pts):
 
 def get_floor_quad(mask):
     """
-    Cari quadrilateral lantai yang lebih akurat menggunakan approxPolyDP.
-    Fallback ke minAreaRect jika tidak bisa dapat 4 titik.
+    ✅ FIX 2: Langsung pakai 4 titik ekstrem dari convex hull.
+    Lebih stabil untuk lantai dibanding approxPolyDP yang sering
+    gagal menghasilkan tepat 4 titik dan fallback tidak akurat.
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
     largest = max(contours, key=cv2.contourArea)
+    hull    = cv2.convexHull(largest).reshape(-1, 2).astype(np.float32)
 
-    # Coba approxPolyDP dulu untuk dapat quadrilateral yang lebih presisi
-    peri    = cv2.arcLength(largest, True)
-    epsilon = 0.02 * peri
-    approx  = cv2.approxPolyDP(largest, epsilon, True)
+    if len(hull) < 4:
+        # Fallback: minAreaRect jika hull terlalu kecil
+        rect = cv2.minAreaRect(largest)
+        box  = cv2.boxPoints(rect).astype(np.float32)
+        return order_points(box)
 
-    if len(approx) == 4:
-        pts = approx.reshape(4, 2).astype(np.float32)
-        return order_points(pts)
+    # Ambil 4 titik ekstrem langsung — reliable untuk bentuk lantai apapun
+    tl = hull[np.argmin(hull[:, 0] + hull[:, 1])]
+    tr = hull[np.argmin(-hull[:, 0] + hull[:, 1])]
+    br = hull[np.argmax(hull[:, 0] + hull[:, 1])]
+    bl = hull[np.argmax(-hull[:, 0] + hull[:, 1])]
 
-    # Coba epsilon lebih besar untuk dapat tepat 4 titik
-    for eps_factor in [0.03, 0.05, 0.08, 0.12]:
-        approx = cv2.approxPolyDP(largest, eps_factor * peri, True)
-        if len(approx) == 4:
-            pts = approx.reshape(4, 2).astype(np.float32)
-            return order_points(pts)
-
-    # Fallback: convex hull → ambil 4 titik ekstrem
-    hull = cv2.convexHull(largest).reshape(-1, 2).astype(np.float32)
-    if len(hull) >= 4:
-        pts = get_extreme_points(hull)
-        return order_points(pts)
-
-    # Final fallback: minAreaRect
-    rect = cv2.minAreaRect(largest)
-    box  = cv2.boxPoints(rect).astype(np.float32)
-    return order_points(box)
-
-def get_extreme_points(pts):
-    """Ambil 4 titik dari convex hull: top-left, top-right, bottom-right, bottom-left."""
-    center = pts.mean(axis=0)
-    tl = pts[np.argmin(pts[:, 0] + pts[:, 1])]
-    tr = pts[np.argmin(-pts[:, 0] + pts[:, 1])]
-    br = pts[np.argmax(pts[:, 0] + pts[:, 1])]
-    bl = pts[np.argmax(-pts[:, 0] + pts[:, 1])]
-    return np.array([tl, tr, br, bl], dtype=np.float32)
+    pts = np.array([tl, tr, br, bl], dtype=np.float32)
+    return order_points(pts)
 
 # =============================================
-# HELPER: LIGHTING TRANSFER
+# LIGHTING TRANSFER
 # =============================================
 def transfer_lighting(original_floor_bgr, texture_warped_bgr, mask):
-    """
-    Transfer pencahayaan dari lantai asli ke tekstur baru (LAB color space).
-    Rasio: 70% lighting asli, 30% tekstur sendiri.
-    """
     orig_lab = cv2.cvtColor(original_floor_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     tex_lab  = cv2.cvtColor(texture_warped_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
@@ -299,25 +267,25 @@ def transfer_lighting(original_floor_bgr, texture_warped_bgr, mask):
     tex_mean  = tex_l[floor_area].mean()
     tex_std   = tex_l[floor_area].std() + 1e-6
 
-    tex_l_adj  = (tex_l - tex_mean) / tex_std * orig_std + orig_mean
-    tex_l_adj  = np.clip(tex_l_adj, 0, 255)
+    tex_l_adj = (tex_l - tex_mean) / tex_std * orig_std + orig_mean
+    tex_l_adj = np.clip(tex_l_adj, 0, 255)
 
-    blend_l    = 0.7 * tex_l_adj + 0.3 * tex_l
-    blend_l    = np.clip(blend_l, 0, 255)
+    blend_l   = 0.7 * tex_l_adj + 0.3 * tex_l
+    blend_l   = np.clip(blend_l, 0, 255)
 
     tex_lab[:, :, 0] = blend_l
     return cv2.cvtColor(tex_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
 # =============================================
-# HELPER: AMBIENT OCCLUSION (shadow di tepi)
+# AMBIENT OCCLUSION
 # =============================================
 def apply_ambient_occlusion(img_bgr, mask):
     kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (40, 40))
     mask_eroded  = cv2.erode(mask, kernel_large)
     edge_area    = mask - mask_eroded
 
-    shadow_map   = cv2.GaussianBlur(edge_area.astype(np.float32), (61, 61), 0)
-    shadow_max   = shadow_map.max()
+    shadow_map = cv2.GaussianBlur(edge_area.astype(np.float32), (61, 61), 0)
+    shadow_max = shadow_map.max()
     if shadow_max > 0:
         shadow_map /= shadow_max
 
@@ -326,12 +294,13 @@ def apply_ambient_occlusion(img_bgr, mask):
     return np.clip(result, 0, 255).astype(np.uint8)
 
 # =============================================
-# HELPER: FEATHERED EDGE BLENDING
+# FEATHERED EDGE BLENDING
+# FIX BUG 3b: blur_radius 41 → 21, power 1.8 → 2.2 (tepi lebih tajam)
 # =============================================
-def create_feathered_mask(mask, blur_radius=41, power=1.8):
+def create_feathered_mask(mask, blur_radius=21, power=2.2):
     """
-    Buat alpha mask dengan tepi yang gradual (feathered), bukan blur biasa.
-    power > 1  → transisi lebih tajam di tengah dan lebih lembut di tepi.
+    ✅ FIX 3b: blur_radius dikurangi dari 41 → 21 agar tepi tidak terlalu buram.
+    power dinaikkan 1.8 → 2.2 agar transisi lebih tajam di tengah.
     """
     mask_f    = mask.astype(np.float32)
     blurred   = cv2.GaussianBlur(mask_f, (blur_radius, blur_radius), 0)
@@ -342,15 +311,16 @@ def create_feathered_mask(mask, blur_radius=41, power=1.8):
 # CORE: APPLY TEXTURE
 # =============================================
 def apply_texture_perspective(img_bgr, mask, texture_bgr,
-                             tile_size=TEXTURE_TILE_SIZE, feather_power=1.8):
+                              tile_size=TEXTURE_TILE_SIZE, feather_power=2.2):
+    # ✅ FIX 1b: paksa binary di sini juga — cegah nilai float masuk blending
+    mask = (mask > 0).astype(np.uint8)
+
     orig_h, orig_w = img_bgr.shape[:2]
 
-    # Dapatkan quadrilateral lantai (lebih presisi dari minAreaRect)
     dst_pts = get_floor_quad(mask)
     if dst_pts is None:
         return img_bgr
 
-    # Hitung dimensi tekstur berdasarkan ukuran quad
     max_w = max(int(max(
         np.linalg.norm(dst_pts[1] - dst_pts[0]),
         np.linalg.norm(dst_pts[2] - dst_pts[3])
@@ -367,20 +337,16 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
         [0,         max_h - 1],
     ], dtype=np.float32)
 
-    # ★ PERUBAHAN UTAMA: tile dulu, baru warp (bukan resize → warp)
     texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
-
     M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
 
-    # Transfer lighting dari lantai asli
     mask_3ch       = np.stack([mask] * 3, axis=-1)
     original_floor = (img_bgr * mask_3ch).astype(np.uint8)
     texture_lit    = transfer_lighting(original_floor, texture_warped, mask)
 
-    # ★ PERUBAHAN: feathered blending (lebih natural dari blur biasa)
-    alpha          = create_feathered_mask(mask, blur_radius=41, power=feather_power)
-    alpha_3ch      = np.stack([alpha] * 3, axis=-1)
+    alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
+    alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
     result = (alpha_3ch * texture_lit + (1 - alpha_3ch) * img_bgr).astype(np.uint8)
     result = apply_ambient_occlusion(result, mask)
@@ -388,12 +354,12 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     return result
 
 # =============================================
-# HELPER: RESIZE OUTPUT UNTUK PREVIEW
+# HELPER: RESIZE UNTUK PREVIEW
 # =============================================
 def resize_for_preview(img_pil, max_side=1280):
     w, h = img_pil.size
     if max(w, h) > max_side:
-        scale = max_side / max(w, h)
+        scale   = max_side / max(w, h)
         img_pil = img_pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return img_pil
 
@@ -424,7 +390,7 @@ for i, (name, path) in enumerate(TEXTURES.items()):
 
 st.info(f"Tekstur dipilih: **{selected_texture}**")
 
-# --- Slider sensitivitas & ukuran tile ---
+# --- Pengaturan lanjutan ---
 with st.expander("⚙️ Pengaturan lanjutan"):
     conf_threshold = st.slider(
         "Sensitivitas deteksi",
@@ -438,8 +404,8 @@ with st.expander("⚙️ Pengaturan lanjutan"):
     )
     feather_power = st.slider(
         "Ketajaman tepi blending",
-        1.0, 3.0, 1.8, 0.1,
-        help="Nilai lebih tinggi = tepi tekstur lebih tajam/tegas."
+        1.0, 3.0, 2.2, 0.1,
+        help="Nilai lebih tinggi = tepi tekstur lebih tajam/tegas. Default dinaikkan ke 2.2."
     )
 
 # --- Proses ---
@@ -454,7 +420,6 @@ if room_file:
         st.error(err)
         st.stop()
 
-    # Preview foto yang diupload
     st.image(resize_for_preview(room_img), caption="Foto yang diupload", use_container_width=True)
 
     room_bgr = cv2.cvtColor(np.array(room_img), cv2.COLOR_RGB2BGR)
@@ -474,7 +439,6 @@ if room_file:
             )
             st.stop()
 
-        # Info area lantai yang terdeteksi
         floor_pct = mask.sum() / mask.size * 100
         st.success(f"✅ Lantai terdeteksi ({floor_pct:.1f}% area gambar)")
 
@@ -498,9 +462,8 @@ if room_file:
             st.image(result_pil,
                      caption=f"Tekstur {selected_texture}", use_container_width=True)
 
-        # Download
-        buf = io.BytesIO()
-        # Simpan dalam resolusi penuh (sebelum preview resize)
+        # Download resolusi penuh
+        buf         = io.BytesIO()
         full_result = Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB))
         full_result.save(buf, format="JPEG", quality=95)
         st.download_button(
@@ -511,13 +474,9 @@ if room_file:
             use_container_width=True
         )
 
-        # Debug: tampilkan mask (opsional, bisa di-comment kalau tidak perlu)
+        # Debug mask
         with st.expander("🔬 Lihat mask deteksi lantai"):
-            mask_vis = (mask * 255).astype(np.uint8)
-            mask_colored = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2RGB)
-            # Overlay mask pada gambar asli
-            overlay      = room_img.copy()
-            overlay_arr  = np.array(overlay)
+            overlay_arr            = np.array(room_img).copy()
             overlay_arr[mask > 0] = (
                 overlay_arr[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
             ).astype(np.uint8)
