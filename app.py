@@ -418,7 +418,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     st.write(f"alpha unique values sample: {np.unique(alpha.round(3))[:10]}")
     st.write(f"mask unique: {np.unique(mask)}")
     st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
-    st.write(f"img_bgr min/max: {img_bgr_f.min()}, {img_bgr_f.max()}")
+    st.write(f"img_bgr min/max: {img_bgr.min()}, {img_bgr_f.max()}")
 
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
