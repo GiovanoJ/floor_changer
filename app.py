@@ -314,18 +314,23 @@ def create_feathered_mask(mask, blur_radius=21, power=2.2):
 # =============================================
 def apply_texture_perspective(img_bgr, mask, texture_bgr,
                               tile_size=TEXTURE_TILE_SIZE, feather_power=2.2):
-    mask = (mask > 0).astype(np.uint8)
 
+    mask = (mask > 0).astype(np.uint8)
     orig_h, orig_w = img_bgr.shape[:2]
 
+    # =========================
+    # GET FLOOR QUAD
+    # =========================
     dst_pts = get_floor_quad(mask)
     if dst_pts is None:
+        st.warning("Quad lantai tidak ditemukan")
         return img_bgr
 
     max_w = max(int(max(
         np.linalg.norm(dst_pts[1] - dst_pts[0]),
         np.linalg.norm(dst_pts[2] - dst_pts[3])
     )), 1)
+
     max_h = max(int(max(
         np.linalg.norm(dst_pts[3] - dst_pts[0]),
         np.linalg.norm(dst_pts[2] - dst_pts[1])
@@ -338,37 +343,77 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
         [0,         max_h - 1],
     ], dtype=np.float32)
 
-    texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
-    M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    # =========================
+    # TILE TEXTURE
+    # =========================
+    texture_tiled = tile_texture(texture_bgr, max_w, max_h, tile_size)
 
-    st.write(f"dst_pts: {dst_pts}")
-    st.write(f"max_w={max_w}, max_h={max_h}")
-    st.write(f"det(M)={np.linalg.det(M):.6f}")
+    # =========================
+    # PERSPECTIVE TRANSFORM
+    # =========================
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
-    st.write(f"texture_warped min/max: {texture_warped.min()}, {texture_warped.max()}")
 
-    cv2.imwrite("debug_1_texture_warped.jpg", texture_warped)
+    # =========================
+    # DEBUG SECTION (UI + SAVE)
+    # =========================
+    with st.expander("🔬 Debug Texture Pipeline", expanded=True):
 
-    mask_3ch       = np.stack([mask] * 3, axis=-1).astype(np.float32) / 1.0
+        st.write(f"dst_pts: {dst_pts}")
+        st.write(f"max_w={max_w}, max_h={max_h}")
+        st.write(f"det(M)={np.linalg.det(M):.6f}")
+
+        st.write(f"texture_warped min/max: {texture_warped.min()}, {texture_warped.max()}")
+
+        st.image(texture_warped, caption="1. Warped Texture", channels="BGR")
+        cv2.imwrite("debug_1_texture_warped.jpg", texture_warped)
+
+    # =========================
+    # ORIGINAL FLOOR
+    # =========================
+    mask_3ch = np.stack([mask] * 3, axis=-1).astype(np.float32)
     original_floor = (img_bgr.astype(np.float32) * mask_3ch).astype(np.uint8)
 
-    cv2.imwrite("debug_2_original_floor.jpg", original_floor)
-    st.write(f"original_floor min/max: {original_floor.min()}, {original_floor.max()}")
+    with st.expander("🔬 Original Floor"):
+        st.write(f"original_floor min/max: {original_floor.min()}, {original_floor.max()}")
+        st.image(original_floor, caption="2. Original Floor", channels="BGR")
 
-    texture_lit    = transfer_lighting(original_floor, texture_warped, mask)
+    cv2.imwrite("debug_2_original_floor.jpg", original_floor)
+
+    # =========================
+    # LIGHTING TRANSFER
+    # =========================
+    texture_lit = transfer_lighting(original_floor, texture_warped, mask)
+
+    with st.expander("🔬 Lighting Transfer"):
+        st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
+        st.image(texture_lit, caption="3. Texture Lighting", channels="BGR")
 
     cv2.imwrite("debug_3_texture_lit.jpg", texture_lit)
-    st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
 
-    alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
+    # =========================
+    # BLENDING
+    # =========================
+    alpha = create_feathered_mask(mask, blur_radius=21, power=feather_power)
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
     result = (alpha_3ch * texture_lit + (1 - alpha_3ch) * img_bgr).astype(np.uint8)
 
-    cv2.imwrite("debug_4_before_ao.jpg", result)
-    st.write(f"result before AO min/max: {result.min()}, {result.max()}")
+    with st.expander("🔬 Before Ambient Occlusion"):
+        st.write(f"result min/max: {result.min()}, {result.max()}")
+        st.image(result, caption="4. Before AO", channels="BGR")
 
+    cv2.imwrite("debug_4_before_ao.jpg", result)
+
+    # =========================
+    # AMBIENT OCCLUSION
+    # =========================
     result = apply_ambient_occlusion(result, mask)
+
+    with st.expander("🔬 Final Result"):
+        st.image(result, caption="5. Final Result", channels="BGR")
+
     cv2.imwrite("debug_5_final.jpg", result)
 
     return result
