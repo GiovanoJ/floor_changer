@@ -339,8 +339,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
     M              = cv2.getPerspectiveTransform(dst_pts, src_pts)  # ← dibalik!
     texture_warped = cv2.warpPerspective(
-        texture_tiled, M, (orig_w, orig_h),
-        flags=cv2.WARP_INVERSE_MAP  # ← tambah flag ini
+        texture_tiled, M, (orig_w, orig_h)
     )
 
 
