@@ -201,6 +201,8 @@ def tile_texture(texture_bgr, target_w, target_h, tile_size=TEXTURE_TILE_SIZE):
     # ✅ FIX 3a: pilih interpolasi yang tepat
     interp   = cv2.INTER_AREA if tile_size < texture_bgr.shape[1] else cv2.INTER_LANCZOS4
     tex_tile = cv2.resize(texture_bgr, (tile_size, tile_size), interpolation=interp)
+    st.write(f"tex_tile shape: {tex_tile.shape}")
+    st.write(f"tex_tile min/max: {tex_tile.min()}, {tex_tile.max()}")
     tiles_x  = -(-target_w // tile_size)
     tiles_y  = -(-target_h // tile_size)
     tiled    = np.tile(tex_tile, (tiles_y, tiles_x, 1))
@@ -343,6 +345,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     st.write(f"max_w={max_w}, max_h={max_h}")
     st.write(f"det(M)={np.linalg.det(M):.6f}")
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
+    st.write(f"texture_warped min/max: {texture_warped.min()}, {texture_warped.max()}")
 
     mask_3ch       = np.stack([mask] * 3, axis=-1).astype(np.float32) / 1.0
     original_floor = (img_bgr.astype(np.float32) * mask_3ch).astype(np.uint8)
@@ -447,6 +450,11 @@ if room_file:
 
         # Step 2: Terapkan tekstur
         with st.spinner("🖌️ Menerapkan tekstur..."):
+
+            st.write(f"texture_bgr shape: {texture_bgr.shape}")
+            st.write(f"texture_bgr dtype: {texture_bgr.dtype}")
+            st.write(f"texture_bgr min/max: {texture_bgr.min()}, {texture_bgr.max()}")
+            st.write(f"texture_bgr is None: {texture_bgr is None}")
             result_bgr = apply_texture_perspective(
                 room_bgr, mask, texture_bgr,
                 tile_size=tile_size,
