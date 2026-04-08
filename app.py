@@ -308,6 +308,9 @@ def apply_ambient_occlusion(img_bgr, mask):
     # 4. Blur pinggirannya agar gradasi bayangannya halus
     blur_size = kernel_size * 2 - 1
     shadow_map = cv2.GaussianBlur(edge_area.astype(np.float32), (blur_size, blur_size), 0)
+
+    st.image(shadow_map, caption="Shadow Map", clamp=True)
+    st.write("shadow min/max:", shadow_map.min(), shadow_map.max())
     
     # 5. Normalisasi nilai bayangan (mencegah NaN atau Infinity)
     shadow_max = shadow_map.max()
