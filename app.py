@@ -312,7 +312,6 @@ def create_feathered_mask(mask, blur_radius=21, power=2.2):
 # =============================================
 def apply_texture_perspective(img_bgr, mask, texture_bgr,
                               tile_size=TEXTURE_TILE_SIZE, feather_power=2.2):
-    # ✅ FIX 1b: paksa binary di sini juga — cegah nilai float masuk blending
     mask = (mask > 0).astype(np.uint8)
 
     orig_h, orig_w = img_bgr.shape[:2]
@@ -341,8 +340,12 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
 
-    mask_3ch       = np.stack([mask] * 3, axis=-1)
-    original_floor = (img_bgr * mask_3ch).astype(np.uint8)
+    print(f"dst_pts: {dst_pts}")
+    print(f"max_w={max_w}, max_h={max_h}")
+    print(f"det(M)={np.linalg.det(M):.6f}")
+    
+    mask_3ch       = np.stack([mask] * 3, axis=-1).astype(np.float32) / 1.0
+    original_floor = (img_bgr.astype(np.float32) * mask_3ch).astype(np.uint8)
     texture_lit    = transfer_lighting(original_floor, texture_warped, mask)
 
     alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
