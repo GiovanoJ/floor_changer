@@ -370,6 +370,9 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
+    mask_bool = mask > 0
+    
+    st.write(f"pixel texture_warped di dalam mask: {texture_warped[mask_bool][:5]}")
 
     if texture_warped.max() == 0:
         st.error("texture_warped kosong! Cek dst_pts dan M matrix.")
@@ -408,7 +411,14 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     img_bgr_f    = img_bgr.astype(np.float32)
     texture_lit_f = texture_lit.astype(np.float32)
 
+    mask_bool = mask > 0
+    st.write(f"pixel texture_lit di dalam mask: {texture_lit_f[mask_bool][:5]}")
+    st.write(f"pixel alpha di dalam mask: {alpha_3ch[:,:,0][mask_bool][:5]}")
+    st.write(f"pixel img_bgr di dalam mask: {img_bgr_f[mask_bool][:5]}")
+
     result = (alpha_3ch * texture_lit_f + (1 - alpha_3ch) * img_bgr_f)
+    st.write(f"pixel result di dalam mask: {result[mask_bool][:5]}")
+    st.write(f"result dtype: {result.dtype}, min/max: {result.min():.1f}, {result.max():.1f}")
     result = np.clip(result, 0, 255).astype(np.uint8)    
 
     with st.expander("🔬 Before Ambient Occlusion"):
