@@ -379,6 +379,12 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
     M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
     texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
+    st.write(f"texture_warped sample di mask: {texture_warped[mask > 0][:3]}")
+    st.write(f"texture_lit sample di mask: {texture_lit[mask > 0][:3]}")
+    st.write(f"img_bgr sample di mask: {img_bgr[mask > 0][:3]}")
+    st.write(f"alpha sample di mask: {alpha[mask > 0][:5]}")
+    st.write(f"blended sample di mask: {blended[mask > 0][:3]}")
+    st.write(f"result sample di mask: {result[mask > 0][:3]}")
 
     if texture_warped.max() == 0:
         st.warning("Texture warp gagal, mengembalikan gambar asli.")
