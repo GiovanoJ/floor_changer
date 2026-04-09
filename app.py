@@ -393,6 +393,11 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     st.write(f"texture_warped di mask: {texture_warped[mask > 0][:3]}")
     st.write(f"dst_pts: {dst_pts}")
 
+    h, w = img_bgr.shape[:2]
+    st.write(f"image size: {w}x{h}")
+    st.write(f"dst_pts: {dst_pts}")
+    st.write(f"dst_pts in bounds: x={dst_pts[:,0].min():.0f}–{dst_pts[:,0].max():.0f}, y={dst_pts[:,1].min():.0f}–{dst_pts[:,1].max():.0f}")
+    
     if texture_warped.max() == 0:
         st.warning("Texture warp gagal, mengembalikan gambar asli.")
         return img_bgr
