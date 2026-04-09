@@ -376,15 +376,22 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     ], dtype=np.float32)
 
     # --- Tile & warp texture ---
-    texture_tiled  = tile_texture(texture_bgr, max_w, max_h, tile_size)
-    M              = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    texture_warped = cv2.warpPerspective(texture_tiled, M, (orig_w, orig_h))
-    st.write(f"texture_warped sample di mask: {texture_warped[mask > 0][:3]}")
-    st.write(f"texture_lit sample di mask: {texture_lit[mask > 0][:3]}")
-    st.write(f"img_bgr sample di mask: {img_bgr[mask > 0][:3]}")
-    st.write(f"alpha sample di mask: {alpha[mask > 0][:5]}")
-    st.write(f"blended sample di mask: {blended[mask > 0][:3]}")
-    st.write(f"result sample di mask: {result[mask > 0][:3]}")
+    texture_tiled = tile_texture(texture_bgr, orig_w, orig_h, tile_size)
+
+    # Warp gambar asli KE flat space, lalu overlay texture, lalu warp balik
+    # Ini lebih reliable daripada warp texture ke perspective
+    M_fwd = cv2.getPerspectiveTransform(dst_pts, src_pts)  # lantai → flat
+    M_inv = cv2.getPerspectiveTransform(src_pts, dst_pts)  # flat → lantai
+
+    # Tile texture di flat space sesuai ukuran quad
+    texture_flat  = tile_texture(texture_bgr, max_w, max_h, tile_size)
+
+    # Warp texture flat KE perspective lantai
+    texture_warped = cv2.warpPerspective(texture_flat, M_inv, (orig_w, orig_h))
+
+    # Verifikasi
+    st.write(f"texture_warped di mask: {texture_warped[mask > 0][:3]}")
+    st.write(f"dst_pts: {dst_pts}")
 
     if texture_warped.max() == 0:
         st.warning("Texture warp gagal, mengembalikan gambar asli.")
