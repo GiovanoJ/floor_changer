@@ -382,6 +382,19 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     # Ini lebih reliable daripada warp texture ke perspective
     M_fwd = cv2.getPerspectiveTransform(dst_pts, src_pts)  # lantai → flat
     M_inv = cv2.getPerspectiveTransform(src_pts, dst_pts)  # flat → lantai
+    # Taruh ini setelah M_inv didefinisikan, sebelum warpPerspective:
+    # Test dengan gambar solid merah — kalau ini hitam berarti M_inv rusak
+    test_solid = np.zeros((max_h, max_w, 3), dtype=np.uint8)
+    test_solid[:] = (0, 0, 255)  # merah solid
+    test_warped_solid = cv2.warpPerspective(test_solid, M_inv, (orig_w, orig_h))
+    st.write(f"solid red warped at mask center: {test_warped_solid[1152, 1127]}")
+    st.write(f"solid red warped max: {test_warped_solid.max()}")
+    st.image(test_warped_solid, caption="solid red warped", channels="BGR")
+
+    # Juga print M_inv lengkap
+    st.write(f"M_inv:\n{M_inv}")
+    st.write(f"src_pts:\n{src_pts}")
+    st.write(f"dst_pts:\n{dst_pts}")
 
     # Tile texture di flat space sesuai ukuran quad
     texture_flat  = tile_texture(texture_bgr, max_w, max_h, tile_size)
@@ -421,19 +434,6 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     # Pastikan area di luar mask benar-benar gambar asli
     result             = img_bgr.copy()
     result[mask > 0]   = blended[mask > 0]
-
-    st.write(f"mask shape: {mask.shape}")
-    st.write(f"img_bgr shape: {img_bgr.shape}")
-    st.write(f"mask sum (lantai px): {mask.sum()}")
-    # Lihat koordinat mask yang aktif
-    y_coords, x_coords = np.where(mask > 0)
-    st.write(f"mask active y: {y_coords.min()}–{y_coords.max()}")
-    st.write(f"mask active x: {x_coords.min()}–{x_coords.max()}")
-    # Cek test_warped di koordinat dst_pts langsung
-    y_mid = int((940 + 1364) / 2)
-    x_mid = int((226 + 2029) / 2)
-    st.write(f"test_warped at center of dst_pts ({x_mid},{y_mid}): {test_warped[y_mid, x_mid]}")
-    st.write(f"mask value at center of dst_pts: {mask[y_mid, x_mid]}")
 
     # --- Ambient occlusion ---
     result = apply_ambient_occlusion(result, mask)
