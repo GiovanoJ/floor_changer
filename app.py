@@ -148,14 +148,6 @@ def tile_texture(tex_bgr, target_w, target_h, tile_size):
 
 # ── CORE ───────────────────────────────────────────────────────────────────────
 def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
-    """
-    1. Tile texture seukuran gambar
-    2. Remap: tiap pixel lantai → koordinat texture berdasarkan posisi
-       relatif dalam bounding box (perspektif sederhana tapi reliable)
-    3. Transfer lighting hanya dari/ke pixel lantai (aman, tidak hitam)
-    4. Blend dengan feather
-    5. Ambient occlusion di tepi
-    """
     img   = img_bgr.copy()
     mask  = (mask > 0).astype(np.uint8)
     H, W  = img.shape[:2]
@@ -165,72 +157,59 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
     if len(ys) == 0:
         return img
 
-    # ── 1. Tile texture ──────────────────────────────────────────────────────
     tex_full = tile_texture(tex_bgr, W, H, tile_size)
+    st.write(f"[1] tex_full: {tex_full[ys[0], xs[0]]}")  # pixel pertama di mask
 
-    # ── 2. Remap dengan perspektif ───────────────────────────────────────────
-    # Ambil bounding box lantai
     y_min, y_max = int(ys.min()), int(ys.max())
     x_min, x_max = int(xs.min()), int(xs.max())
     fh = max(y_max - y_min, 1)
     fw = max(x_max - x_min, 1)
 
-    # Grid koordinat seluruh gambar
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-
-    # Posisi relatif (0–1) dalam bounding box lantai
     rel_x = np.clip((xx - x_min) / fw, 0.0, 1.0)
     rel_y = np.clip((yy - y_min) / fh, 0.0, 1.0)
-
-    # Map ke koordinat texture (pakai seluruh lebar/tinggi texture agar tile terlihat)
     map_x = (rel_x * (W - 1)).astype(np.float32)
     map_y = (rel_y * (H - 1)).astype(np.float32)
 
     tex_warped = cv2.remap(tex_full, map_x, map_y,
                            interpolation=cv2.INTER_LINEAR,
                            borderMode=cv2.BORDER_REFLECT)
+    st.write(f"[2] tex_warped: {tex_warped[ys[0], xs[0]]}")
 
-    # ── 3. Transfer lighting ─────────────────────────────────────────────────
-    # Hitung statistik HANYA dari pixel di dalam mask — aman, tidak terpengaruh
-    # pixel hitam di luar mask
     img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
     tex_lab = cv2.cvtColor(tex_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # L channel: sesuaikan mean & std texture ke lantai asli
     orig_L = img_lab[:, :, 0][area]
     tex_L  = tex_lab[:, :, 0][area]
-
     o_mean, o_std = orig_L.mean(), orig_L.std() + 1e-6
     t_mean, t_std = tex_L.mean(),  tex_L.std()  + 1e-6
 
-    # Terapkan adjustment hanya pada channel L, seluruh gambar
     tex_lab[:, :, 0] = np.clip(
         (tex_lab[:, :, 0] - t_mean) / t_std * o_std + o_mean, 0, 255
     )
-
-    # Chroma: blend 80% texture asli, 20% lantai asli (preserves texture color)
     tex_lab[:, :, 1] = tex_lab[:, :, 1] * 0.8 + img_lab[:, :, 1] * 0.2
     tex_lab[:, :, 2] = tex_lab[:, :, 2] * 0.8 + img_lab[:, :, 2] * 0.2
 
     tex_lit = cv2.cvtColor(np.clip(tex_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    st.write(f"[3] tex_lit: {tex_lit[ys[0], xs[0]]}")
 
-    # ── 4. Blend ─────────────────────────────────────────────────────────────
-    result         = img.copy()
-    result[area]   = tex_lit[area]          # hard paste dulu ke seluruh mask
+    result       = img.copy()
+    result[area] = tex_lit[area]
+    st.write(f"[4] result after paste: {result[ys[0], xs[0]]}")
 
-    # Feather tepi: GaussianBlur pada mask → alpha gradient di tepi
     if feather_radius > 0:
         k      = feather_radius * 2 + 1
         mask_f = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
-        # mask_f: 1.0 di tengah lantai, 0.0 di luar, gradien di tepi
         a3     = np.stack([mask_f] * 3, axis=-1)
         result = np.clip(
             a3 * result.astype(np.float32) + (1.0 - a3) * img.astype(np.float32),
             0, 255
         ).astype(np.uint8)
+    st.write(f"[5] result after feather: {result[ys[0], xs[0]]}")
 
-    # ── 5. Ambient occlusion ─────────────────────────────────────────────────
     result = _ambient_occlusion(result, mask)
+    st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
+
     return result
 
 
