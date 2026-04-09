@@ -346,98 +346,58 @@ def create_feathered_mask(mask, blur_radius=21, power=1.5):
 # =============================================
 def apply_texture_perspective(img_bgr, mask, texture_bgr,
                               tile_size=TEXTURE_TILE_SIZE, feather_power=1.5):
-
-    # Selalu copy agar tidak memodifikasi array asli
     img_bgr = img_bgr.copy()
     mask    = (mask > 0).astype(np.uint8)
-
     orig_h, orig_w = img_bgr.shape[:2]
 
-    # --- Floor quad ---
+    # Tile texture seukuran gambar penuh
+    texture_full = tile_texture(texture_bgr, orig_w, orig_h, tile_size)
+
+    # Ambil dst_pts untuk homography
     dst_pts = get_floor_quad(mask)
     if dst_pts is None:
         st.warning("Quad lantai tidak ditemukan")
         return img_bgr
 
-    max_w = max(int(max(
-        np.linalg.norm(dst_pts[1] - dst_pts[0]),
-        np.linalg.norm(dst_pts[2] - dst_pts[3])
-    )), 1)
-    max_h = max(int(max(
-        np.linalg.norm(dst_pts[3] - dst_pts[0]),
-        np.linalg.norm(dst_pts[2] - dst_pts[1])
-    )), 1)
-
+    # Buat texture dengan perspektif menggunakan homography
+    # Warp texture_full menggunakan inverse mask sebagai sumber
     src_pts = np.array([
-        [0,         0        ],
-        [max_w - 1, 0        ],
-        [max_w - 1, max_h - 1],
-        [0,         max_h - 1],
+        [0.,        0.       ],
+        [orig_w-1., 0.       ],
+        [orig_w-1., orig_h-1.],
+        [0.,        orig_h-1.],
     ], dtype=np.float32)
 
-    # --- Tile & warp texture ---
-    texture_tiled = tile_texture(texture_bgr, orig_w, orig_h, tile_size)
+    # Homography dari full image space ke dst quad
+    H, _ = cv2.findHomography(src_pts, dst_pts)
+    H_inv = np.linalg.inv(H)
 
-    # Warp gambar asli KE flat space, lalu overlay texture, lalu warp balik
-    # Ini lebih reliable daripada warp texture ke perspective
-    M_fwd = cv2.getPerspectiveTransform(dst_pts, src_pts)  # lantai → flat
-    M_inv = cv2.getPerspectiveTransform(src_pts, dst_pts)  # flat → lantai
-    # Taruh ini setelah M_inv didefinisikan, sebelum warpPerspective:
-    # Test dengan gambar solid merah — kalau ini hitam berarti M_inv rusak
-    test_solid = np.zeros((max_h, max_w, 3), dtype=np.uint8)
-    test_solid[:] = (0, 0, 255)  # merah solid
-    test_warped_solid = cv2.warpPerspective(test_solid, M_inv, (orig_w, orig_h))
-    st.write(f"solid red warped at mask center: {test_warped_solid[1152, 1127]}")
-    st.write(f"solid red warped max: {test_warped_solid.max()}")
-    st.image(test_warped_solid, caption="solid red warped", channels="BGR")
-
-    # Juga print M_inv lengkap
-    st.write(f"M_inv:\n{M_inv}")
-    st.write(f"src_pts:\n{src_pts}")
-    st.write(f"dst_pts:\n{dst_pts}")
-
-    # Tile texture di flat space sesuai ukuran quad
-    texture_flat  = tile_texture(texture_bgr, max_w, max_h, tile_size)
-
-    # Warp texture flat KE perspective lantai
-    texture_warped = cv2.warpPerspective(texture_flat, M_inv, (orig_w, orig_h))
+    # Warp texture_full dengan H_inv agar perspektif matching
+    texture_warped = cv2.warpPerspective(texture_full, H_inv, (orig_w, orig_h))
 
     # Verifikasi
-    st.write(f"texture_warped di mask: {texture_warped[mask > 0][:3]}")
-    st.write(f"dst_pts: {dst_pts}")
+    ys, xs = np.where(mask > 0)
+    mid_y, mid_x = ys[len(ys)//2], xs[len(xs)//2]
+    st.write(f"texture_warped at mask center ({mid_x},{mid_y}): {texture_warped[mid_y, mid_x]}")
 
-    h, w = img_bgr.shape[:2]
-    st.write(f"image size: {w}x{h}")
-    st.write(f"dst_pts: {dst_pts}")
-    st.write(f"dst_pts in bounds: x={dst_pts[:,0].min():.0f}–{dst_pts[:,0].max():.0f}, y={dst_pts[:,1].min():.0f}–{dst_pts[:,1].max():.0f}")
-
-    if texture_warped.max() == 0:
-        st.warning("Texture warp gagal, mengembalikan gambar asli.")
-        return img_bgr
-
-    # --- Lighting transfer ---
-    # FIX: kirim img_bgr ASLI (bukan original_floor yang hitam di luar mask)
+    # Lighting transfer dengan gambar asli
     texture_lit = transfer_lighting(img_bgr, texture_warped, mask)
 
-    # --- Alpha blending ---
+    # Alpha blending
     alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
     alpha     = np.clip(alpha.astype(np.float32), 0.0, 1.0)
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
 
-    img_f     = img_bgr.astype(np.float32)
-    tex_f     = np.clip(texture_lit.astype(np.float32), 0.0, 255.0)
+    img_f = img_bgr.astype(np.float32)
+    tex_f = np.clip(texture_lit.astype(np.float32), 0.0, 255.0)
 
-    # Blend hanya di area mask, luar mask pakai gambar asli
     blended = alpha_3ch * tex_f + (1.0 - alpha_3ch) * img_f
     blended = np.clip(blended, 0, 255).astype(np.uint8)
 
-    # Pastikan area di luar mask benar-benar gambar asli
-    result             = img_bgr.copy()
-    result[mask > 0]   = blended[mask > 0]
+    result           = img_bgr.copy()
+    result[mask > 0] = blended[mask > 0]
 
-    # --- Ambient occlusion ---
     result = apply_ambient_occlusion(result, mask)
-
     return result
 
 # =============================================
