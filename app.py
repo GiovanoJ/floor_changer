@@ -289,7 +289,12 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
                                interpolation=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_REFLECT)
 
-    # Transfer lighting dari lantai asli
+    st.write(f"texture_warped at mask center: {texture_warped[ys[len(ys)//2], xs[len(xs)//2]]}")
+    st.write(f"map_x range: {map_x.min():.1f}–{map_x.max():.1f}")
+    st.write(f"map_y range: {map_y.min():.1f}–{map_y.max():.1f}")
+    st.write(f"texture_full min/max: {texture_full.min()}, {texture_full.max()}")
+    st.image(cv2.cvtColor(texture_warped, cv2.COLOR_BGR2RGB), caption="texture_warped")
+
     floor_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     tex_lab   = cv2.cvtColor(texture_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
 
