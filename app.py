@@ -263,77 +263,62 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     mask    = (mask > 0).astype(np.uint8)
     orig_h, orig_w = img_bgr.shape[:2]
 
-    # Dapatkan 4 titik sudut lantai
-    dst_pts = get_floor_quad(mask)
-    if dst_pts is None:
-        st.warning("Quad lantai tidak ditemukan.")
+    texture_full = tile_texture(texture_bgr, orig_w, orig_h, tile_size)
+
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
         return img_bgr
 
-    # Hitung ukuran flat space dari panjang sisi quad
-    w_top   = np.linalg.norm(dst_pts[1] - dst_pts[0])
-    w_bot   = np.linalg.norm(dst_pts[2] - dst_pts[3])
-    h_left  = np.linalg.norm(dst_pts[3] - dst_pts[0])
-    h_right = np.linalg.norm(dst_pts[2] - dst_pts[1])
-    flat_w  = max(int(max(w_top, w_bot)), 1)
-    flat_h  = max(int(max(h_left, h_right)), 1)
+    y_min, y_max = int(ys.min()), int(ys.max())
+    x_min, x_max = int(xs.min()), int(xs.max())
+    floor_h = max(y_max - y_min, 1)
+    floor_w = max(x_max - x_min, 1)
 
-    flat_pts = np.array([
-        [0,          0         ],
-        [flat_w - 1, 0         ],
-        [flat_w - 1, flat_h - 1],
-        [0,          flat_h - 1],
-    ], dtype=np.float32)
+    # Vektorisasi: buat map_x dan map_y sekaligus
+    yy, xx = np.mgrid[0:orig_h, 0:orig_w]
 
-    # Warp lantai asli ke flat space untuk ambil statistik warna
-    M_to_flat  = cv2.getPerspectiveTransform(dst_pts, flat_pts)
-    floor_flat = cv2.warpPerspective(img_bgr, M_to_flat, (flat_w, flat_h))
+    # Koordinat relatif tiap pixel terhadap bounding box lantai
+    rel_x = np.clip((xx - x_min) / floor_w, 0, 1)
+    rel_y = np.clip((yy - y_min) / floor_h, 0, 1)
 
-    # Tile texture di flat space
-    texture_flat = tile_texture(texture_bgr, flat_w, flat_h, tile_size)
+    # Map ke koordinat di texture_full
+    map_x = (rel_x * (orig_w - 1)).astype(np.float32)
+    map_y = (rel_y * (orig_h - 1)).astype(np.float32)
 
-    # Transfer lighting di flat space (lebih akurat karena tidak ada distorsi)
-    floor_lab = cv2.cvtColor(floor_flat, cv2.COLOR_BGR2LAB).astype(np.float32)
-    tex_lab   = cv2.cvtColor(texture_flat, cv2.COLOR_BGR2LAB).astype(np.float32)
+    texture_warped = cv2.remap(texture_full, map_x, map_y,
+                               interpolation=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REFLECT)
 
-    orig_mean = floor_lab[:, :, 0].mean()
-    orig_std  = floor_lab[:, :, 0].std() + 1e-6
-    tex_mean  = tex_lab[:, :, 0].mean()
-    tex_std   = tex_lab[:, :, 0].std() + 1e-6
+    # Transfer lighting dari lantai asli
+    floor_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    tex_lab   = cv2.cvtColor(texture_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # Sesuaikan brightness, pertahankan sedikit warna asli texture
-    tex_lab[:, :, 0] = np.clip(
-        (tex_lab[:, :, 0] - tex_mean) / tex_std * orig_std + orig_mean, 0, 255
+    area = mask > 0
+    orig_mean = floor_lab[:,:,0][area].mean()
+    orig_std  = floor_lab[:,:,0][area].std() + 1e-6
+    tex_mean  = tex_lab[:,:,0][area].mean()
+    tex_std   = tex_lab[:,:,0][area].std() + 1e-6
+
+    tex_lab[:,:,0] = np.clip(
+        (tex_lab[:,:,0] - tex_mean) / tex_std * orig_std + orig_mean, 0, 255
     )
-    # Blend chroma: 70% texture asli + 30% warna lantai
-    tex_lab[:, :, 1] = tex_lab[:, :, 1] * 0.7 + floor_lab[:, :, 1] * 0.3
-    tex_lab[:, :, 2] = tex_lab[:, :, 2] * 0.7 + floor_lab[:, :, 2] * 0.3
+    tex_lab[:,:,1] = tex_lab[:,:,1] * 0.7 + floor_lab[:,:,1] * 0.3
+    tex_lab[:,:,2] = tex_lab[:,:,2] * 0.7 + floor_lab[:,:,2] * 0.3
+    texture_lit = cv2.cvtColor(np.clip(tex_lab, 0, 255).astype(np.uint8),
+                               cv2.COLOR_LAB2BGR)
 
-    texture_lit_flat = cv2.cvtColor(
-        np.clip(tex_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR
-    )
-
-    # Warp texture yang sudah di-lit balik ke perspektif asli
-    M_to_persp     = cv2.getPerspectiveTransform(flat_pts, dst_pts)
-    texture_warped = cv2.warpPerspective(texture_lit_flat, M_to_persp, (orig_w, orig_h))
-
-    # Tempel texture hanya di area mask
+    # Tempel hanya di mask
     result           = img_bgr.copy()
-    result[mask > 0] = texture_warped[mask > 0]
+    result[mask > 0] = texture_lit[mask > 0]
 
-    # Feather tepi mask agar transisi halus
+    # Feather tepi
     if feather_radius > 0:
-        k       = feather_radius * 2 + 1
-        mask_f  = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
-        mask_f  = np.clip(mask_f, 0, 1)
-        alpha_3 = np.stack([mask_f] * 3, axis=-1)
-        result  = np.clip(
-            alpha_3 * result.astype(np.float32) + (1 - alpha_3) * img_bgr.astype(np.float32),
-            0, 255
-        ).astype(np.uint8)
+        k      = feather_radius * 2 + 1
+        mask_f = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
+        a3     = np.stack([mask_f]*3, axis=-1)
+        result = np.clip(a3 * result + (1-a3) * img_bgr, 0, 255).astype(np.uint8)
 
-    # Ambient occlusion di tepi lantai
     result = apply_ambient_occlusion(result, mask)
-
     return result
 
 # =============================================
