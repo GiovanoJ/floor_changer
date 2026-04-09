@@ -98,9 +98,11 @@ def get_floor_mask(sess, img_bgr, conf_threshold=0.25):
 
     cx, cy, w, h = [float(best_det[i]) for i in range(4)]
     mask_coef    = best_det[5:37]
-    mask_raw     = np.clip(np.einsum('c,chw->hw', mask_coef, proto), -10, 10)
-    mask_sig     = 1 / (1 + np.exp(-mask_raw))
-    mask_sig     = cv2.GaussianBlur(mask_sig, (7, 7), 0)
+
+    # Clamp sebelum sigmoid → cegah overflow → cegah NaN
+    mask_raw = np.clip(np.einsum('c,chw->hw', mask_coef, proto), -10, 10)
+    mask_sig = 1 / (1 + np.exp(-mask_raw))
+    mask_sig = cv2.GaussianBlur(mask_sig, (7, 7), 0)
 
     x1 = max(0,   int((cx - w/2) / imgsz * 160))
     y1 = max(0,   int((cy - h/2) / imgsz * 160))
@@ -113,7 +115,7 @@ def get_floor_mask(sess, img_bgr, conf_threshold=0.25):
     mask_crop[y1:y2, x1:x2] = mask_sig[y1:y2, x1:x2]
     mask_full = cv2.resize(mask_crop, (imgsz, imgsz))
     mask_orig = cv2.resize(mask_full, (orig_w, orig_h))
-    binary    = (mask_orig > 0.65).astype(np.uint8)
+    binary    = (mask_orig > 0.5).astype(np.uint8)
 
     ke = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
     ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
@@ -146,123 +148,149 @@ def tile_texture(tex_bgr, target_w, target_h, tile_size):
     ny     = -(-target_h // tile_size)
     return np.tile(tile, (ny, nx, 1))[:target_h, :target_w]
 
-# ── CORE ───────────────────────────────────────────────────────────────────────
-def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
+# ── LIGHTING TRANSFER ──────────────────────────────────────────────────────────
+def transfer_lighting_masked(img_bgr, tex_bgr, mask):
     """
-    1. Tile texture seukuran gambar
-    2. Remap: tiap pixel lantai → koordinat texture berdasarkan posisi
-       relatif dalam bounding box (perspektif sederhana tapi reliable)
-    3. Transfer lighting hanya dari/ke pixel lantai (aman, tidak hitam)
-    4. Blend dengan feather
-    5. Ambient occlusion di tepi
+    Sesuaikan brightness texture agar cocok dengan lantai asli.
+
+    FIX UTAMA dari bug hitam:
+    - Statistik L dihitung HANYA dari pixel dalam mask (area=True)
+    - Bukan dari seluruh gambar — pixel hitam di luar mask tidak ikut
+      mempengaruhi mean/std dan membuat texture jadi gelap
     """
-    img   = img_bgr.copy()
-    mask  = (mask > 0).astype(np.uint8)
-    H, W  = img.shape[:2]
-    area  = mask > 0
+    area = mask > 0
+    if area.sum() == 0:
+        return tex_bgr
 
-    ys, xs = np.where(area)
-    if len(ys) == 0:
-        return img
+    img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    tex_lab = cv2.cvtColor(tex_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # ── 1. Tile texture ──────────────────────────────────────────────────────
-    tex_full = tile_texture(tex_bgr, W, H, tile_size)
+    # ★ Hitung statistik HANYA dari pixel lantai di gambar asli
+    orig_L  = img_lab[:, :, 0][area]
+    o_mean  = float(orig_L.mean())
+    o_std   = float(orig_L.std()) + 1e-6
 
-    # ── 2. Remap dengan perspektif ───────────────────────────────────────────
-    # Ambil bounding box lantai
-    y_min, y_max = int(ys.min()), int(ys.max())
-    x_min, x_max = int(xs.min()), int(xs.max())
-    fh = max(y_max - y_min, 1)
-    fw = max(x_max - x_min, 1)
+    # ★ Hitung statistik HANYA dari pixel lantai di texture
+    tex_L   = tex_lab[:, :, 0][area]
+    t_mean  = float(tex_L.mean())
+    t_std   = float(tex_L.std()) + 1e-6
 
-    # Grid koordinat seluruh gambar
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-
-    # Posisi relatif (0–1) dalam bounding box lantai
-    rel_x = np.clip((xx - x_min) / fw, 0.0, 1.0)
-    rel_y = np.clip((yy - y_min) / fh, 0.0, 1.0)
-
-    # Map ke koordinat texture (pakai seluruh lebar/tinggi texture agar tile terlihat)
-    map_x = (rel_x * (W - 1)).astype(np.float32)
-    map_y = (rel_y * (H - 1)).astype(np.float32)
-
-    tex_warped = cv2.remap(tex_full, map_x, map_y,
-                           interpolation=cv2.INTER_LINEAR,
-                           borderMode=cv2.BORDER_REFLECT)
-
-    # ── 3. Transfer lighting ─────────────────────────────────────────────────
-    # Hitung statistik HANYA dari pixel di dalam mask — aman, tidak terpengaruh
-    # pixel hitam di luar mask
-    img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
-    tex_lab = cv2.cvtColor(tex_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-    # L channel: sesuaikan mean & std texture ke lantai asli
-    orig_L = img_lab[:, :, 0][area]
-    tex_L  = tex_lab[:, :, 0][area]
-
-    o_mean, o_std = orig_L.mean(), orig_L.std() + 1e-6
-    t_mean, t_std = tex_L.mean(),  tex_L.std()  + 1e-6
-
-    # Terapkan adjustment hanya pada channel L, seluruh gambar
+    # Terapkan normalisasi ke seluruh texture (bukan hanya mask)
+    # supaya hasilnya konsisten sebelum di-blend
     tex_lab[:, :, 0] = np.clip(
-        (tex_lab[:, :, 0] - t_mean) / t_std * o_std + o_mean, 0, 255
+        (tex_lab[:, :, 0] - t_mean) / t_std * o_std + o_mean,
+        0, 255
     )
 
-    # Chroma: blend 80% texture asli, 20% lantai asli (preserves texture color)
-    tex_lab[:, :, 1] = tex_lab[:, :, 1] * 0.8 + img_lab[:, :, 1] * 0.2
-    tex_lab[:, :, 2] = tex_lab[:, :, 2] * 0.8 + img_lab[:, :, 2] * 0.2
+    # Blend chroma: 85% warna texture, 15% warna asli lantai
+    # Agar texture tidak kehilangan warnanya tapi tetap menyatu
+    tex_lab[:, :, 1] = tex_lab[:, :, 1] * 0.85 + img_lab[:, :, 1] * 0.15
+    tex_lab[:, :, 2] = tex_lab[:, :, 2] * 0.85 + img_lab[:, :, 2] * 0.15
 
-    tex_lit = cv2.cvtColor(np.clip(tex_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return cv2.cvtColor(np.clip(tex_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-    # ── 4. Blend ─────────────────────────────────────────────────────────────
-    result         = img.copy()
-    result[area]   = tex_lit[area]          # hard paste dulu ke seluruh mask
-
-    # Feather tepi: GaussianBlur pada mask → alpha gradient di tepi
-    if feather_radius > 0:
-        k      = feather_radius * 2 + 1
-        mask_f = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
-        # mask_f: 1.0 di tengah lantai, 0.0 di luar, gradien di tepi
-        a3     = np.stack([mask_f] * 3, axis=-1)
-        result = np.clip(
-            a3 * result.astype(np.float32) + (1.0 - a3) * img.astype(np.float32),
-            0, 255
-        ).astype(np.uint8)
-
-    # ── 5. Ambient occlusion ─────────────────────────────────────────────────
-    result = _ambient_occlusion(result, mask)
-    return result
-
-
-def _ambient_occlusion(img_bgr, mask, intensity=0.28):
-    """Bayangan tipis di tepi lantai untuk kesan realistis."""
-    m255 = (mask > 0).astype(np.uint8) * 255
-    ys, xs = np.where(mask > 0)
-    if len(ys) == 0:
+# ── AMBIENT OCCLUSION ──────────────────────────────────────────────────────────
+def apply_ambient_occlusion(img_bgr, mask, intensity=0.22):
+    area = mask > 0
+    if not area.any():
         return img_bgr
 
+    ys, xs = np.where(area)
     fh = int(ys.max() - ys.min())
     fw = int(xs.max() - xs.min())
     ks = max(int(min(fh, fw) * 0.04), 11)
     if ks % 2 == 0:
         ks += 1
 
-    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
-    eroded  = cv2.erode(m255, kernel)
-    edge    = cv2.subtract(m255, eroded).astype(np.float32)
+    m255   = mask.astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+    eroded = cv2.erode(m255, kernel)
+    edge   = cv2.subtract(m255, eroded).astype(np.float32)
 
     bs = ks * 2 - 1
     if bs % 2 == 0:
         bs += 1
+
     smap = cv2.GaussianBlur(edge, (bs, bs), 0)
     smax = smap.max()
     if smax < 0.01:
         return img_bgr
 
-    smap  = (smap / smax) * (edge > 0).astype(np.float32)
-    s3    = np.stack([smap] * 3, axis=-1)
-    dark  = np.clip(1.0 - intensity * s3, 0.0, 1.0)
+    smap = (smap / smax) * (edge > 0).astype(np.float32)
+    s3   = np.stack([smap] * 3, axis=-1)
+    dark = np.clip(1.0 - intensity * s3, 0.0, 1.0)
     return np.clip(img_bgr.astype(np.float32) * dark, 0, 255).astype(np.uint8)
+
+# ── CORE: APPLY TEXTURE ────────────────────────────────────────────────────────
+def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
+    """
+    Pipeline (aman untuk Streamlit Cloud, tanpa warpPerspective yang bisa crash):
+
+    1. Tile texture ke ukuran canvas penuh
+    2. Remap dengan koordinat relatif lantai (perspektif sederhana tapi reliable)
+    3. Transfer lighting dihitung HANYA dari pixel dalam mask → tidak hitam
+    4. Feather blend di tepi mask
+    5. Ambient occlusion
+
+    Kenapa pakai remap bukan warpPerspective:
+    - warpPerspective menghasilkan pixel hitam (nilai 0) di luar area transform
+    - Pixel hitam itu masuk ke kalkulasi lighting → mean turun → output gelap
+    - remap + BORDER_REFLECT tidak pernah menghasilkan pixel hitam
+    """
+    H, W = img_bgr.shape[:2]
+    area = mask > 0
+
+    ys, xs = np.where(area)
+    if len(ys) == 0:
+        return img_bgr
+
+    # ── 1. Tile texture ke canvas penuh ─────────────────────────────────────
+    tex_full = tile_texture(tex_bgr, W, H, tile_size)
+
+    # ── 2. Remap: texture mengikuti posisi relatif lantai ───────────────────
+    y_min, y_max = int(ys.min()), int(ys.max())
+    x_min, x_max = int(xs.min()), int(xs.max())
+    fh = max(y_max - y_min, 1)
+    fw = max(x_max - x_min, 1)
+
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+
+    rel_x = np.clip((xx - x_min) / fw, 0.0, 1.0)
+    rel_y = np.clip((yy - y_min) / fh, 0.0, 1.0)
+
+    map_x = (rel_x * (W - 1)).astype(np.float32)
+    map_y = (rel_y * (H - 1)).astype(np.float32)
+
+    # BORDER_REFLECT → tidak ada pixel hitam di tepi
+    tex_warped = cv2.remap(tex_full, map_x, map_y,
+                           interpolation=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REFLECT)
+
+    # ── 3. Transfer lighting (mask-only statistics) ──────────────────────────
+    tex_lit = transfer_lighting_masked(img_bgr, tex_warped, mask)
+
+    # ── 4. Feather blend ─────────────────────────────────────────────────────
+    if feather_radius > 0:
+        k      = feather_radius * 2 + 1
+        mask_f = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
+    else:
+        mask_f = mask.astype(np.float32)
+
+    # Float blend → tidak ada integer truncation artifacts
+    a3 = np.stack([mask_f] * 3, axis=-1)
+    blend_zone = mask_f > 0
+    result = np.where(
+        np.stack([blend_zone] * 3, axis=-1),
+        np.clip(
+            a3 * tex_lit.astype(np.float32) + (1.0 - a3) * img_bgr.astype(np.float32),
+            0, 255
+        ).astype(np.uint8),
+        img_bgr
+    )
+
+    # ── 5. Ambient occlusion ─────────────────────────────────────────────────
+    result = apply_ambient_occlusion(result, mask)
+    return result
 
 # ── HELPER ─────────────────────────────────────────────────────────────────────
 def resize_preview(img_pil, max_side=1280):
@@ -299,7 +327,7 @@ with st.expander("⚙️ Pengaturan lanjutan"):
     tile_size = st.slider("Ukuran tile tekstur (px)", 100, 600, TEXTURE_TILE_SIZE, 50,
         help="Kecil = serat lebih rapat. Besar = serat lebih kasar.")
     feather_radius = st.slider("Kelembutan tepi", 0, 40, 15, 5,
-        help="Semakin besar = tepi texture lebih halus.")
+        help="Semakin besar = transisi tepi texture lebih gradual.")
 
 if room_file:
     room_img, err = validate_image(room_file)
@@ -345,6 +373,6 @@ if room_file:
 
         with st.expander("🔬 Lihat mask deteksi lantai"):
             ov = np.array(room_img).copy()
-            ov[mask > 0] = (ov[mask > 0] * 0.5 + np.array([0,255,0]) * 0.5).astype(np.uint8)
+            ov[mask > 0] = (ov[mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5).astype(np.uint8)
             st.image(resize_preview(Image.fromarray(ov)),
                      caption="Area lantai terdeteksi (hijau)", use_container_width=True)
