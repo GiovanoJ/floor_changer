@@ -383,27 +383,6 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     M_fwd = cv2.getPerspectiveTransform(dst_pts, src_pts)  # lantai → flat
     M_inv = cv2.getPerspectiveTransform(src_pts, dst_pts)  # flat → lantai
 
-    st.write(f"det(M_inv): {np.linalg.det(M_inv):.6f}")
-    st.write(f"texture_flat shape: {texture_flat.shape}, min/max: {texture_flat.min()}, {texture_flat.max()}")
-
-    # Test warp dengan rectangle sederhana — bypass order_points
-    dst_simple = np.array([
-        [226.,  940.],   # tl
-        [2029., 940.],   # tr  
-        [2029., 1364.],  # br
-        [226.,  1364.],  # bl
-    ], dtype=np.float32)
-    src_simple = np.array([
-        [0.,        0.       ],
-        [max_w-1.,  0.       ],
-        [max_w-1.,  max_h-1. ],
-        [0.,        max_h-1. ],
-    ], dtype=np.float32)
-    M_test = cv2.getPerspectiveTransform(src_simple, dst_simple)
-    test_warped = cv2.warpPerspective(texture_flat, M_test, (orig_w, orig_h))
-    st.write(f"test_warped di mask: {test_warped[mask > 0][:3]}")
-    st.image(test_warped, caption="test warp", channels="BGR")
-    
     # Tile texture di flat space sesuai ukuran quad
     texture_flat  = tile_texture(texture_bgr, max_w, max_h, tile_size)
 
@@ -442,6 +421,27 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     # Pastikan area di luar mask benar-benar gambar asli
     result             = img_bgr.copy()
     result[mask > 0]   = blended[mask > 0]
+
+    st.write(f"det(M_inv): {np.linalg.det(M_inv):.6f}")
+    st.write(f"texture_flat shape: {texture_flat.shape}, min/max: {texture_flat.min()}, {texture_flat.max()}")
+
+    # Test warp dengan rectangle sederhana — bypass order_points
+    dst_simple = np.array([
+        [226.,  940.],   # tl
+        [2029., 940.],   # tr  
+        [2029., 1364.],  # br
+        [226.,  1364.],  # bl
+    ], dtype=np.float32)
+    src_simple = np.array([
+        [0.,        0.       ],
+        [max_w-1.,  0.       ],
+        [max_w-1.,  max_h-1. ],
+        [0.,        max_h-1. ],
+    ], dtype=np.float32)
+    M_test = cv2.getPerspectiveTransform(src_simple, dst_simple)
+    test_warped = cv2.warpPerspective(texture_flat, M_test, (orig_w, orig_h))
+    st.write(f"test_warped di mask: {test_warped[mask > 0][:3]}")
+    st.image(test_warped, caption="test warp", channels="BGR")
 
     # --- Ambient occlusion ---
     result = apply_ambient_occlusion(result, mask)
