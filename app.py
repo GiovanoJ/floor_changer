@@ -320,27 +320,7 @@ def apply_ambient_occlusion(img_bgr, mask):
 # FEATHERED EDGE BLENDING
 # =============================================
 def create_feathered_mask(mask, blur_radius=21, power=1.5):
-    """
-    Buat alpha mask dengan tepi yang halus menggunakan erode + blur.
-    Nilai tengah lantai = 1.0, tepi fade ke 0.
-    """
-    binary = (mask > 0).astype(np.float32)
-
-    # Erode dulu agar blur tidak "memakan" area tengah
-    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (blur_radius, blur_radius))
-    eroded  = cv2.erode(binary, kernel)
-
-    # Blur dari eroded mask — nilai tengah tetap tinggi, tepi fade
-    k       = blur_radius * 2 + 1
-    blurred = cv2.GaussianBlur(eroded, (k, k), 0)
-
-    if blurred.max() < 0.01:
-        return binary  # fallback: hard mask
-
-    blurred   = blurred / blurred.max()  # normalize 0–1
-    feathered = np.power(np.clip(blurred, 0, 1), power)
-    return feathered.astype(np.float32)
-
+    return (mask > 0).astype(np.float32)
 # =============================================
 # CORE: APPLY TEXTURE
 # =============================================
@@ -389,9 +369,17 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     st.image(cv2.cvtColor(texture_lit, cv2.COLOR_BGR2RGB), caption="texture lit")
 
     # Alpha blending
-    alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
-    alpha     = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    alpha     = (mask > 0).astype(np.float32)  # langsung, tanpa fungsi
     alpha_3ch = np.stack([alpha] * 3, axis=-1)
+
+    img_f = img_bgr.astype(np.float32)
+    tex_f = texture_lit.astype(np.float32)
+
+    result           = img_bgr.copy()
+    result[mask > 0] = np.clip(tex_f[mask > 0], 0, 255).astype(np.uint8)
+
+    result = apply_ambient_occlusion(result, mask)
+    return result
 
     img_f = img_bgr.astype(np.float32)
     tex_f = np.clip(texture_lit.astype(np.float32), 0.0, 255.0)
@@ -405,7 +393,7 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     st.write(f"blended at mask center: {blended[mid_y, mid_x]}")
     st.write(f"result at mask center: {result[mid_y, mid_x]}")
     st.image(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB), caption="blended")
-    
+
     result = apply_ambient_occlusion(result, mask)
     return result
 
