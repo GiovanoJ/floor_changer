@@ -422,26 +422,18 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     result             = img_bgr.copy()
     result[mask > 0]   = blended[mask > 0]
 
-    st.write(f"det(M_inv): {np.linalg.det(M_inv):.6f}")
-    st.write(f"texture_flat shape: {texture_flat.shape}, min/max: {texture_flat.min()}, {texture_flat.max()}")
-
-    # Test warp dengan rectangle sederhana — bypass order_points
-    dst_simple = np.array([
-        [226.,  940.],   # tl
-        [2029., 940.],   # tr  
-        [2029., 1364.],  # br
-        [226.,  1364.],  # bl
-    ], dtype=np.float32)
-    src_simple = np.array([
-        [0.,        0.       ],
-        [max_w-1.,  0.       ],
-        [max_w-1.,  max_h-1. ],
-        [0.,        max_h-1. ],
-    ], dtype=np.float32)
-    M_test = cv2.getPerspectiveTransform(src_simple, dst_simple)
-    test_warped = cv2.warpPerspective(texture_flat, M_test, (orig_w, orig_h))
-    st.write(f"test_warped di mask: {test_warped[mask > 0][:3]}")
-    st.image(test_warped, caption="test warp", channels="BGR")
+    st.write(f"mask shape: {mask.shape}")
+    st.write(f"img_bgr shape: {img_bgr.shape}")
+    st.write(f"mask sum (lantai px): {mask.sum()}")
+    # Lihat koordinat mask yang aktif
+    y_coords, x_coords = np.where(mask > 0)
+    st.write(f"mask active y: {y_coords.min()}–{y_coords.max()}")
+    st.write(f"mask active x: {x_coords.min()}–{x_coords.max()}")
+    # Cek test_warped di koordinat dst_pts langsung
+    y_mid = int((940 + 1364) / 2)
+    x_mid = int((226 + 2029) / 2)
+    st.write(f"test_warped at center of dst_pts ({x_mid},{y_mid}): {test_warped[y_mid, x_mid]}")
+    st.write(f"mask value at center of dst_pts: {mask[y_mid, x_mid]}")
 
     # --- Ambient occlusion ---
     result = apply_ambient_occlusion(result, mask)
