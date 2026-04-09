@@ -412,12 +412,18 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_lit_f = texture_lit.astype(np.float32)
 
     mask_bool = mask > 0
-    st.write(f"pixel texture_warped di dalam mask: {texture_warped[mask_bool][:5]}")
-    st.write(f"dst_pts: {dst_pts}")
-    st.write(f"src_pts: {src_pts}")
+    # st.write(f"pixel texture_warped di dalam mask: {texture_warped[mask_bool][:5]}")
+    # st.write(f"dst_pts: {dst_pts}")
+    # st.write(f"src_pts: {src_pts}")
     # st.write(f"pixel texture_lit di dalam mask: {texture_lit_f[mask_bool][:5]}")
     # st.write(f"pixel alpha di dalam mask: {alpha_3ch[:,:,0][mask_bool][:5]}")
     # st.write(f"pixel img_bgr di dalam mask: {img_bgr_f[mask_bool][:5]}")
+    st.write(f"alpha_3ch dtype: {alpha_3ch.dtype}, min/max: {alpha_3ch.min():.4f}, {alpha_3ch.max():.4f}")
+    st.write(f"texture_lit_f dtype: {texture_lit_f.dtype}, min/max: {texture_lit_f.min():.1f}, {texture_lit_f.max():.1f}")
+    st.write(f"img_bgr_f dtype: {img_bgr_f.dtype}, min/max: {img_bgr_f.min():.1f}, {img_bgr_f.max():.1f}")
+    st.write(f"(1-alpha) min/max: {(1-alpha_3ch).min():.4f}, {(1-alpha_3ch).max():.4f}")
+    st.write(f"alpha*tex sample: {(alpha_3ch * texture_lit_f)[mask_bool][:3]}")
+    st.write(f"(1-alpha)*img sample: {((1-alpha_3ch) * img_bgr_f)[mask_bool][:3]}")
 
     result = (alpha_3ch * texture_lit_f + (1 - alpha_3ch) * img_bgr_f)
     st.write(f"pixel result di dalam mask: {result[mask_bool][:5]}")
