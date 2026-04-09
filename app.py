@@ -384,11 +384,9 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     texture_lit = transfer_lighting(img_bgr, texture_warped, mask)
     st.write(f"texture_lit at mask center: {texture_lit[mid_y, mid_x]}")
     st.write(f"texture_lit min/max: {texture_lit.min()}, {texture_lit.max()}")
-    st.write(f"blended at mask center: {blended[mid_y, mid_x]}")
-    st.write(f"result at mask center: {result[mid_y, mid_x]}")
+
     st.image(cv2.cvtColor(texture_warped, cv2.COLOR_BGR2RGB), caption="texture warped")
     st.image(cv2.cvtColor(texture_lit, cv2.COLOR_BGR2RGB), caption="texture lit")
-    st.image(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB), caption="blended")
 
     # Alpha blending
     alpha     = create_feathered_mask(mask, blur_radius=21, power=feather_power)
@@ -404,6 +402,10 @@ def apply_texture_perspective(img_bgr, mask, texture_bgr,
     result           = img_bgr.copy()
     result[mask > 0] = blended[mask > 0]
 
+    st.write(f"blended at mask center: {blended[mid_y, mid_x]}")
+    st.write(f"result at mask center: {result[mid_y, mid_x]}")
+    st.image(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB), caption="blended")
+    
     result = apply_ambient_occlusion(result, mask)
     return result
 
