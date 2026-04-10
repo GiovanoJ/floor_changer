@@ -146,7 +146,6 @@ def tile_texture(tex_bgr, target_w, target_h, tile_size):
     ny     = -(-target_h // tile_size)
     return np.tile(tile, (ny, nx, 1))[:target_h, :target_w]
 
-# ── CORE ───────────────────────────────────────────────────────────────────────
 def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
     img   = img_bgr.copy()
     mask  = (mask > 0).astype(np.uint8)
@@ -187,10 +186,11 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
     tex_lab[:, :, 0] = np.clip(
         (tex_lab[:, :, 0] - t_mean) / t_std * o_std + o_mean, 0, 255
     )
-    tex_lab[:, :, 1] = tex_lab[:, :, 1] * 0.8 + img_lab[:, :, 1] * 0.2
-    tex_lab[:, :, 2] = tex_lab[:, :, 2] * 0.8 + img_lab[:, :, 2] * 0.2
-
-    tex_lit = cv2.cvtColor(np.clip(tex_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    tex_lab[:, :, 1] = np.clip(tex_lab[:, :, 1], 0, 255)  # biarkan chroma asli
+    tex_lab[:, :, 2] = np.clip(tex_lab[:, :, 2], 0, 255)
+    tex_lit = cv2.cvtColor(tex_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    if tex_lit.min() < 0 or tex_lit.max() > 255:
+        tex_lit = tex_warped.copy()
     st.write(f"[3] tex_lit: {tex_lit[ys[0], xs[0]]}")
 
     result       = img.copy()
@@ -214,7 +214,6 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
 
 
 def _ambient_occlusion(img_bgr, mask, intensity=0.28):
-    """Bayangan tipis di tepi lantai untuk kesan realistis."""
     m255 = (mask > 0).astype(np.uint8) * 255
     ys, xs = np.where(mask > 0)
     if len(ys) == 0:
