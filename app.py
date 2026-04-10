@@ -205,7 +205,12 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
             a3 * result.astype(np.float32) + (1.0 - a3) * img.astype(np.float32),
             0, 255
         ).astype(np.uint8)
-    st.write(f"[5] result after feather: {result[ys[0], xs[0]]}")
+        mid = len(ys) // 2
+    st.write(f"mask_f max: {mask_f.max():.4f}")
+    st.write(f"mask_f di tepi (ys[0],xs[0]): {mask_f[ys[0], xs[0]]:.6f}")
+    st.write(f"mask_f di tengah (ys[mid],xs[mid]): {mask_f[ys[mid], xs[mid]]:.6f}")
+    st.write(f"result di tengah mask: {result[ys[mid], xs[mid]]}")
+    st.write(f"img asli di tengah mask: {img[ys[mid], xs[mid]]}")
 
     result = _ambient_occlusion(result, mask)
     st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
