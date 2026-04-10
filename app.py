@@ -5,6 +5,9 @@ import cv2
 from PIL import Image
 import io
 import os
+import requests
+import base64
+import time
 
 st.set_page_config(page_title="Floor Texture Replacer", page_icon="🏠", layout="centered")
 
@@ -19,11 +22,15 @@ TEXTURES = {
     "MKSC-12": "textures/MKSC-12.png",
 }
 
-MAX_FILE_SIZE_MB  = 10
-MAX_DIMENSION     = 2048
-ALLOWED_TYPES     = {"jpg", "jpeg", "png"}
-TEXTURE_TILE_SIZE = 300
+MAX_FILE_SIZE_MB = 10
+MAX_DIMENSION    = 768   # kelipatan 64 untuk SD
+ALLOWED_TYPES    = {"jpg", "jpeg", "png"}
 
+# Model: SD 1.5 inpainting + ControlNet tile
+# ControlNet tile membaca texture reference → terapkan ke area inpaint
+HF_INPAINT_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
+
+# ── MODEL SEGMENTASI ─────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     if not os.path.exists("best.onnx"):
@@ -37,6 +44,12 @@ def load_model():
 
 session    = load_model()
 input_name = session.get_inputs()[0].name
+
+# ── HELPERS ──────────────────────────────────────────────────────────────────
+def pil_to_b64(img_pil, fmt="PNG"):
+    buf = io.BytesIO()
+    img_pil.save(buf, format=fmt)
+    return base64.b64encode(buf.getvalue()).decode()
 
 def validate_image(f):
     if f is None:
@@ -52,24 +65,25 @@ def validate_image(f):
         if max(w, h) > MAX_DIMENSION:
             s = MAX_DIMENSION / max(w, h)
             img = img.resize((int(w*s), int(h*s)), Image.LANCZOS)
+        # Pastikan kelipatan 8 untuk SD
         w, h = img.size
+        w = (w // 8) * 8
+        h = (h // 8) * 8
+        img = img.resize((w, h), Image.LANCZOS)
         if w < 64 or h < 64:
             return None, f"Gambar terlalu kecil ({w}x{h})."
         return img, None
     except Exception:
         return None, "File rusak atau bukan gambar valid."
 
-def validate_texture(name):
-    if name not in TEXTURES:
-        return None, "Tekstur tidak valid."
-    path = TEXTURES[name]
-    if not os.path.exists(path):
-        return None, f"File tekstur {name} tidak ditemukan."
-    t = cv2.imread(path)
-    if t is None:
-        return None, f"File tekstur {name} tidak bisa dibaca."
-    return t, None
+def resize_preview(img_pil, max_side=1280):
+    w, h = img_pil.size
+    if max(w, h) > max_side:
+        s = max_side / max(w, h)
+        img_pil = img_pil.resize((int(w*s), int(h*s)), Image.LANCZOS)
+    return img_pil
 
+# ── MASK DETECTION ───────────────────────────────────────────────────────────
 def preprocess_image(img_bgr, imgsz=640):
     img = cv2.resize(img_bgr, (imgsz, imgsz))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -135,181 +149,120 @@ def _remove_noise(mask, min_area=5000):
             out[labels == i] = 1
     return out
 
-def tile_texture(tex_bgr, target_w, target_h, tile_size):
-    interp = cv2.INTER_AREA if tile_size < tex_bgr.shape[1] else cv2.INTER_LANCZOS4
-    tile   = cv2.resize(tex_bgr, (tile_size, tile_size), interpolation=interp)
-    nx     = -(-target_w // tile_size)
-    ny     = -(-target_h // tile_size)
-    return np.tile(tile, (ny, nx, 1))[:target_h, :target_w]
+# ── TEXTURE → PROMPT ─────────────────────────────────────────────────────────
+def texture_to_prompt(texture_pil):
+    """
+    Analisis warna dominan texture untuk buat prompt yang akurat.
+    """
+    arr  = np.array(texture_pil.resize((50, 50)))
+    mean = arr.mean(axis=(0,1))  # RGB mean
+    r, g, b = mean
 
-def order_points(pts):
-    rect = np.zeros((4, 2), dtype=np.float32)
-    s    = pts.sum(axis=1)
-    diff = np.diff(pts, axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
+    # Tentukan tone warna
+    brightness = (r + g + b) / 3
+    if brightness > 200:
+        tone = "very light white"
+    elif brightness > 170:
+        tone = "light"
+    elif brightness > 130:
+        tone = "medium"
+    elif brightness > 90:
+        tone = "dark"
+    else:
+        tone = "very dark"
 
-def get_floor_quad(mask):
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    largest = max(contours, key=cv2.contourArea)
-    hull    = cv2.convexHull(largest).reshape(-1, 2).astype(np.float32)
-    if len(hull) < 4:
-        rect = cv2.minAreaRect(largest)
-        return order_points(cv2.boxPoints(rect).astype(np.float32))
-    tl = hull[np.argmin(hull[:,0] + hull[:,1])]
-    tr = hull[np.argmin(-hull[:,0] + hull[:,1])]
-    br = hull[np.argmax(hull[:,0] + hull[:,1])]
-    bl = hull[np.argmax(-hull[:,0] + hull[:,1])]
-    return order_points(np.array([tl, tr, br, bl], dtype=np.float32))
+    # Tentukan hue
+    if r > g and r > b:
+        hue = "warm reddish brown"
+    elif g > r and g > b:
+        hue = "greenish"
+    elif b > r and b > g:
+        hue = "cool gray"
+    elif abs(r-g) < 20 and abs(g-b) < 20:
+        hue = "neutral gray"
+    else:
+        hue = "beige"
 
-def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
-    img  = img_bgr.copy()
-    mask = (mask > 0).astype(np.uint8)
-    H, W = img.shape[:2]
-    area = mask > 0
-
-    ys, xs = np.where(area)
-    if len(ys) == 0:
-        return img
-
-    # ── Dapatkan quad lantai untuk perspective warp ──────────────────────────
-    quad = get_floor_quad(mask)
-    if quad is None:
-        return img
-
-    # tl, tr, br, bl
-    tl, tr, br, bl = quad
-
-    # ── Ukuran flat space ────────────────────────────────────────────────────
-    flat_w = max(int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl))), 1)
-    flat_h = max(int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr))), 1)
-
-    flat_pts = np.array([
-        [0,          0         ],
-        [flat_w - 1, 0         ],
-        [flat_w - 1, flat_h - 1],
-        [0,          flat_h - 1],
-    ], dtype=np.float32)
-
-    # ── Warp lantai asli ke flat space ───────────────────────────────────────
-    M_to_flat  = cv2.getPerspectiveTransform(quad, flat_pts)
-    floor_flat = cv2.warpPerspective(img, M_to_flat, (flat_w, flat_h))
-
-    # ── Tile texture di flat space ───────────────────────────────────────────
-    tex_flat = tile_texture(tex_bgr, flat_w, flat_h, tile_size)
-
-    # ── Transfer lighting di flat space ─────────────────────────────────────
-    # Hitung statistik dari seluruh floor_flat (sudah di-crop, tidak ada area hitam)
-    fl  = cv2.cvtColor(floor_flat, cv2.COLOR_BGR2LAB).astype(np.float32)
-    tl_ = cv2.cvtColor(tex_flat,   cv2.COLOR_BGR2LAB).astype(np.float32)
-
-    # Sesuaikan hanya L channel
-    fl_L_mean = fl[:,:,0].mean()
-    fl_L_std  = fl[:,:,0].std() + 1e-6
-    tl_L_mean = tl_[:,:,0].mean()
-    tl_L_std  = tl_[:,:,0].std() + 1e-6
-
-    tl_[:,:,0] = np.clip(
-        (tl_[:,:,0] - tl_L_mean) / tl_L_std * fl_L_std + fl_L_mean,
-        0, 255
+    return (
+        f"photorealistic {tone} {hue} wood floor planks, "
+        f"natural wood grain texture, same perspective and lighting as the room, "
+        f"high quality interior photography, realistic floor material, 8k"
     )
-    # Chroma: pertahankan texture asli sepenuhnya
-    tex_lit_flat = cv2.cvtColor(tl_.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-    # ── Warp texture kembali ke perspektif ──────────────────────────────────
-    M_to_persp     = cv2.getPerspectiveTransform(flat_pts, quad)
-    texture_warped = cv2.warpPerspective(tex_lit_flat, M_to_persp, (W, H))
+# ── HF INPAINTING API ────────────────────────────────────────────────────────
+def call_hf_inpainting(hf_token, img_pil, mask_pil, prompt,
+                       negative_prompt="", max_retries=3):
+    """
+    Panggil HF Inference API untuk inpainting.
+    Otomatis retry jika model masih loading (503).
+    """
+    headers = {"Authorization": f"Bearer {hf_token}"}
 
-    # Cek apakah warp berhasil — jika tidak, fallback ke flat mapping
-    ys_mid, xs_mid = ys[len(ys)//2], xs[len(xs)//2]
-    if tuple(texture_warped[ys_mid, xs_mid]) == (0, 0, 0):
-        # Fallback: remap flat langsung
-        tex_full = tile_texture(tex_bgr, W, H, tile_size)
-        y_min, y_max = int(ys.min()), int(ys.max())
-        x_min, x_max = int(xs.min()), int(xs.max())
-        fh = max(y_max - y_min, 1)
-        fw = max(x_max - x_min, 1)
-        yy, xx   = np.mgrid[0:H, 0:W].astype(np.float32)
-        map_x    = np.clip((xx - x_min) / fw, 0, 1) * (W - 1)
-        map_y    = np.clip((yy - y_min) / fh, 0, 1) * (H - 1)
-        tex_full_warped = cv2.remap(tex_full,
-                                    map_x.astype(np.float32),
-                                    map_y.astype(np.float32),
-                                    cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        # Transfer lighting untuk fallback
-        fl2  = cv2.cvtColor(img,            cv2.COLOR_BGR2LAB).astype(np.float32)
-        tl2  = cv2.cvtColor(tex_full_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
-        o_m  = fl2[:,:,0][area].mean()
-        o_s  = fl2[:,:,0][area].std() + 1e-6
-        t_m  = tl2[:,:,0][area].mean()
-        t_s  = tl2[:,:,0][area].std() + 1e-6
-        tl2[:,:,0] = np.clip((tl2[:,:,0] - t_m) / t_s * o_s + o_m, 0, 255)
-        texture_warped = cv2.cvtColor(tl2.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "negative_prompt": negative_prompt,
+            "num_inference_steps": 30,
+            "guidance_scale": 7.5,
+            "strength": 0.95,
+        },
+        "image":      pil_to_b64(img_pil),
+        "mask_image": pil_to_b64(mask_pil),
+    }
 
-    # ── Paste texture ke area mask ───────────────────────────────────────────
-    result         = img.copy()
-    result[area]   = texture_warped[area]
+    for attempt in range(max_retries):
+        response = requests.post(HF_API_URL, headers=headers,
+                                 json=payload, timeout=120)
 
-    # ── Feather tepi dengan cv2.seamlessClone jika memungkinkan ─────────────
-    # Gunakan addWeighted per-channel — hindari numpy broadcasting
-    if feather_radius > 0:
-        k       = feather_radius * 2 + 1
-        # Buat alpha mask: blur binary mask → float 0-255
-        alpha   = cv2.GaussianBlur((mask * 255).astype(np.uint8), (k, k), 0)
-        # Blend dengan cv2.addWeighted per channel
-        for c in range(3):
-            a        = alpha.astype(np.float32) / 255.0
-            result[:,:,c] = np.clip(
-                a * result[:,:,c].astype(np.float32) +
-                (1.0 - a) * img[:,:,c].astype(np.float32),
-                0, 255
-            ).astype(np.uint8)
+        if response.status_code == 200:
+            result = Image.open(io.BytesIO(response.content)).convert("RGB")
+            # Resize result ke ukuran input jika berbeda
+            if result.size != img_pil.size:
+                result = result.resize(img_pil.size, Image.LANCZOS)
+            return result, None
 
-    # ── Ambient occlusion ────────────────────────────────────────────────────
-    result = _ambient_occlusion(result, mask)
-    return result
+        elif response.status_code == 503:
+            wait = 30 * (attempt + 1)
+            st.warning(f"⏳ Model masih loading... tunggu {wait} detik (attempt {attempt+1}/{max_retries})")
+            time.sleep(wait)
+            continue
 
-def _ambient_occlusion(img_bgr, mask, intensity=0.28):
-    m255 = (mask > 0).astype(np.uint8) * 255
-    ys, xs = np.where(mask > 0)
-    if len(ys) == 0:
-        return img_bgr
-    fh = int(ys.max() - ys.min())
-    fw = int(xs.max() - xs.min())
-    ks = max(int(min(fh, fw) * 0.04), 11)
-    if ks % 2 == 0:
-        ks += 1
-    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
-    eroded  = cv2.erode(m255, kernel)
-    edge    = cv2.subtract(m255, eroded).astype(np.float32)
-    bs = ks * 2 - 1
-    if bs % 2 == 0:
-        bs += 1
-    smap = cv2.GaussianBlur(edge, (bs, bs), 0)
-    smax = smap.max()
-    if smax < 0.01:
-        return img_bgr
-    smap = (smap / smax) * (edge > 0).astype(np.float32)
-    # Gunakan per-channel untuk hindari numpy broadcasting issue
-    result = img_bgr.copy().astype(np.float32)
+        else:
+            return None, f"API error {response.status_code}: {response.text[:300]}"
+
+    return None, "Model tidak respond setelah beberapa percobaan. Coba lagi dalam 1-2 menit."
+
+# ── COMPOSITE: TEMPEL HASIL AI KE FOTO ASLI ──────────────────────────────────
+def composite_result(original_pil, result_pil, mask_np, feather=15):
+    """
+    Tempel area hasil AI ke foto asli menggunakan mask.
+    Ini memastikan area di luar lantai tetap persis sama.
+    """
+    orig = np.array(original_pil).astype(np.float32)
+    res  = np.array(result_pil.resize(original_pil.size, Image.LANCZOS)).astype(np.float32)
+
+    # Feather mask dengan blur
+    k      = feather * 2 + 1
+    mask_f = cv2.GaussianBlur((mask_np * 255).astype(np.uint8), (k, k), 0).astype(np.float32) / 255.0
+
+    # Blend per channel — hindari numpy broadcasting issue
+    out = orig.copy()
     for c in range(3):
-        result[:,:,c] = np.clip(result[:,:,c] * (1.0 - intensity * smap), 0, 255)
-    return result.astype(np.uint8)
+        out[:,:,c] = np.clip(
+            mask_f * res[:,:,c] + (1.0 - mask_f) * orig[:,:,c],
+            0, 255
+        )
 
-def resize_preview(img_pil, max_side=1280):
-    w, h = img_pil.size
-    if max(w, h) > max_side:
-        s = max_side / max(w, h)
-        img_pil = img_pil.resize((int(w*s), int(h*s)), Image.LANCZOS)
-    return img_pil
+    return Image.fromarray(out.astype(np.uint8))
 
+# ── UI ───────────────────────────────────────────────────────────────────────
 st.title("🏠 Floor Texture Replacer")
 st.write("Upload foto ruangan, pilih tekstur lantai, lalu lihat hasilnya.")
+
+# Token input
+with st.expander("🔑 Setup API Token", expanded=True):
+    hf_token = st.text_input("Hugging Face Token", type="password",
+                              placeholder="hhf_GbAdbMtEureKxfrcUgYwwhIVSagJhpWYdg")
 
 room_file = st.file_uploader("📷 Upload foto ruangan (JPG/PNG, maks 10 MB)",
                               type=list(ALLOWED_TYPES))
@@ -329,19 +282,17 @@ for i, (name, path) in enumerate(TEXTURES.items()):
 st.info(f"Tekstur dipilih: **{selected_texture}**")
 
 with st.expander("⚙️ Pengaturan lanjutan"):
-    conf_threshold = st.slider("Sensitivitas deteksi", 0.10, 0.90, 0.25, 0.05,
-        help="Turunkan jika lantai tidak terdeteksi.")
-    tile_size = st.slider("Ukuran tile tekstur (px)", 100, 600, TEXTURE_TILE_SIZE, 50,
-        help="Kecil = serat lebih rapat. Besar = serat lebih kasar.")
-    feather_radius = st.slider("Kelembutan tepi", 0, 40, 15, 5,
-        help="Semakin besar = tepi texture lebih halus.")
+    conf_threshold = st.slider("Sensitivitas deteksi", 0.10, 0.90, 0.25, 0.05)
+    custom_prompt  = st.text_area("Custom prompt (kosongkan = auto dari texture)",
+                                  value="")
+    negative_prompt = st.text_input(
+        "Negative prompt",
+        value="blurry, low quality, distorted, people, furniture, carpet, rug, tiles"
+    )
+    feather_radius = st.slider("Kelembutan tepi blend", 0, 40, 15, 5)
 
-if room_file:
+if room_file and hf_token:
     room_img, err = validate_image(room_file)
-    if err:
-        st.error(err); st.stop()
-
-    tex_bgr, err = validate_texture(selected_texture)
     if err:
         st.error(err); st.stop()
 
@@ -350,6 +301,7 @@ if room_file:
 
     if st.button("🎨 Terapkan Tekstur", type="primary", use_container_width=True):
 
+        # Step 1: Deteksi lantai
         with st.spinner("🔍 Mendeteksi lantai..."):
             mask = get_floor_mask(session, room_bgr, conf_threshold=conf_threshold)
 
@@ -357,29 +309,71 @@ if room_file:
             st.warning("⚠️ Lantai tidak terdeteksi. Coba turunkan sensitivitas deteksi.")
             st.stop()
 
-        st.success(f"✅ Lantai terdeteksi ({mask.sum()/mask.size*100:.1f}% area gambar)")
-
-        with st.spinner("🖌️ Menerapkan tekstur..."):
-            result_bgr = apply_texture(room_bgr, mask, tex_bgr,
-                                       tile_size=tile_size,
-                                       feather_radius=feather_radius)
-            result_pil = resize_preview(Image.fromarray(
-                cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)))
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(resize_preview(room_img), caption="Original", use_container_width=True)
-        with col2:
-            st.image(result_pil, caption=f"Tekstur {selected_texture}", use_container_width=True)
-
-        buf = io.BytesIO()
-        Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)).save(buf, "JPEG", quality=95)
-        st.download_button("⬇️ Download hasil (resolusi penuh)", buf.getvalue(),
-                           f"floor_{selected_texture}.jpg", "image/jpeg",
-                           use_container_width=True)
+        floor_pct = mask.sum() / mask.size * 100
+        st.success(f"✅ Lantai terdeteksi ({floor_pct:.1f}% area gambar)")
 
         with st.expander("🔬 Lihat mask deteksi lantai"):
             ov = np.array(room_img).copy()
             ov[mask > 0] = (ov[mask > 0] * 0.5 + np.array([0,255,0]) * 0.5).astype(np.uint8)
             st.image(resize_preview(Image.fromarray(ov)),
                      caption="Area lantai terdeteksi (hijau)", use_container_width=True)
+
+        # Step 2: Load texture dan buat prompt
+        tex_path = TEXTURES[selected_texture]
+        if not os.path.exists(tex_path):
+            st.error(f"File texture {selected_texture} tidak ditemukan.")
+            st.stop()
+
+        tex_pil = Image.open(tex_path).convert("RGB")
+
+        if custom_prompt.strip():
+            prompt = custom_prompt.strip()
+        else:
+            prompt = texture_to_prompt(tex_pil)
+
+        st.write(f"📝 **Prompt:** `{prompt}`")
+
+        # Step 3: Siapkan mask (putih = area yang di-generate)
+        mask_resized = cv2.resize(mask, (room_img.size[0], room_img.size[1]),
+                                  interpolation=cv2.INTER_NEAREST)
+        mask_pil = Image.fromarray((mask_resized * 255).astype(np.uint8)).convert("RGB")
+
+        # Step 4: Panggil HF inpainting
+        with st.spinner("🤖 AI sedang generate lantai... (30-90 detik pertama kali)"):
+            result_pil, err = call_hf_inpainting(
+                hf_token, room_img, mask_pil,
+                prompt, negative_prompt
+            )
+
+        if err:
+            st.error(f"❌ {err}")
+            st.info("💡 Tips: Jika error 503, model masih loading — tunggu 1 menit lalu coba lagi.")
+            st.stop()
+
+        # Step 5: Composite hasil AI ke foto asli dengan mask
+        final_pil = composite_result(room_img, result_pil, mask_resized, feather=feather_radius)
+
+        # Tampilkan hasil
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(resize_preview(room_img), caption="Original", use_container_width=True)
+        with col2:
+            st.image(resize_preview(final_pil), caption=f"Tekstur {selected_texture} (AI)",
+                     use_container_width=True)
+
+        # Juga tampilkan raw AI output untuk perbandingan
+        with st.expander("🔬 Raw AI output (sebelum composite)"):
+            st.image(resize_preview(result_pil), caption="Output langsung dari AI",
+                     use_container_width=True)
+
+        # Download
+        buf = io.BytesIO()
+        final_pil.save(buf, "JPEG", quality=95)
+        st.download_button("⬇️ Download hasil", buf.getvalue(),
+                           f"floor_{selected_texture}_ai.jpg", "image/jpeg",
+                           use_container_width=True)
+
+elif room_file and not hf_token:
+    st.warning("⚠️ Masukkan Hugging Face API token dulu di bagian atas.")
+elif not room_file and hf_token:
+    st.info("📷 Upload foto ruangan untuk mulai.")
