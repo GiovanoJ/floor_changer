@@ -24,7 +24,6 @@ MAX_DIMENSION     = 2048
 ALLOWED_TYPES     = {"jpg", "jpeg", "png"}
 TEXTURE_TILE_SIZE = 300
 
-# ── MODEL ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     if not os.path.exists("best.onnx"):
@@ -39,7 +38,6 @@ def load_model():
 session    = load_model()
 input_name = session.get_inputs()[0].name
 
-# ── VALIDATION ─────────────────────────────────────────────────────────────────
 def validate_image(f):
     if f is None:
         return None, "File tidak ditemukan."
@@ -72,7 +70,6 @@ def validate_texture(name):
         return None, f"File tekstur {name} tidak bisa dibaca."
     return t, None
 
-# ── MASK DETECTION ─────────────────────────────────────────────────────────────
 def preprocess_image(img_bgr, imgsz=640):
     img = cv2.resize(img_bgr, (imgsz, imgsz))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -138,7 +135,6 @@ def _remove_noise(mask, min_area=5000):
             out[labels == i] = 1
     return out
 
-# ── TEXTURE TILING ─────────────────────────────────────────────────────────────
 def tile_texture(tex_bgr, target_w, target_h, tile_size):
     interp = cv2.INTER_AREA if tile_size < tex_bgr.shape[1] else cv2.INTER_LANCZOS4
     tile   = cv2.resize(tex_bgr, (tile_size, tile_size), interpolation=interp)
@@ -146,102 +142,151 @@ def tile_texture(tex_bgr, target_w, target_h, tile_size):
     ny     = -(-target_h // tile_size)
     return np.tile(tile, (ny, nx, 1))[:target_h, :target_w]
 
+def order_points(pts):
+    rect = np.zeros((4, 2), dtype=np.float32)
+    s    = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+def get_floor_quad(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    hull    = cv2.convexHull(largest).reshape(-1, 2).astype(np.float32)
+    if len(hull) < 4:
+        rect = cv2.minAreaRect(largest)
+        return order_points(cv2.boxPoints(rect).astype(np.float32))
+    tl = hull[np.argmin(hull[:,0] + hull[:,1])]
+    tr = hull[np.argmin(-hull[:,0] + hull[:,1])]
+    br = hull[np.argmax(hull[:,0] + hull[:,1])]
+    bl = hull[np.argmax(-hull[:,0] + hull[:,1])]
+    return order_points(np.array([tl, tr, br, bl], dtype=np.float32))
+
 def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_radius=15):
-    img   = img_bgr.copy()
-    mask  = (mask > 0).astype(np.uint8)
-    H, W  = img.shape[:2]
-    area  = mask > 0
+    img  = img_bgr.copy()
+    mask = (mask > 0).astype(np.uint8)
+    H, W = img.shape[:2]
+    area = mask > 0
 
     ys, xs = np.where(area)
     if len(ys) == 0:
         return img
 
-    tex_full = tile_texture(tex_bgr, W, H, tile_size)
-    st.write(f"[1] tex_full: {tex_full[ys[0], xs[0]]}")  # pixel pertama di mask
+    # ── Dapatkan quad lantai untuk perspective warp ──────────────────────────
+    quad = get_floor_quad(mask)
+    if quad is None:
+        return img
 
-    y_min, y_max = int(ys.min()), int(ys.max())
-    x_min, x_max = int(xs.min()), int(xs.max())
-    fh = max(y_max - y_min, 1)
-    fw = max(x_max - x_min, 1)
+    # tl, tr, br, bl
+    tl, tr, br, bl = quad
 
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    rel_x = np.clip((xx - x_min) / fw, 0.0, 1.0)
-    rel_y = np.clip((yy - y_min) / fh, 0.0, 1.0)
-    map_x = (rel_x * (W - 1)).astype(np.float32)
-    map_y = (rel_y * (H - 1)).astype(np.float32)
+    # ── Ukuran flat space ────────────────────────────────────────────────────
+    flat_w = max(int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl))), 1)
+    flat_h = max(int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr))), 1)
 
-    tex_warped = cv2.remap(tex_full, map_x, map_y,
-                           interpolation=cv2.INTER_LINEAR,
-                           borderMode=cv2.BORDER_REFLECT)
-    st.write(f"[2] tex_warped: {tex_warped[ys[0], xs[0]]}")
+    flat_pts = np.array([
+        [0,          0         ],
+        [flat_w - 1, 0         ],
+        [flat_w - 1, flat_h - 1],
+        [0,          flat_h - 1],
+    ], dtype=np.float32)
 
-    img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
-    tex_lab = cv2.cvtColor(tex_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
+    # ── Warp lantai asli ke flat space ───────────────────────────────────────
+    M_to_flat  = cv2.getPerspectiveTransform(quad, flat_pts)
+    floor_flat = cv2.warpPerspective(img, M_to_flat, (flat_w, flat_h))
 
-    orig_L = img_lab[:, :, 0][area]
-    tex_L  = tex_lab[:, :, 0][area]
-    o_mean, o_std = orig_L.mean(), orig_L.std() + 1e-6
-    t_mean, t_std = tex_L.mean(),  tex_L.std()  + 1e-6
+    # ── Tile texture di flat space ───────────────────────────────────────────
+    tex_flat = tile_texture(tex_bgr, flat_w, flat_h, tile_size)
 
-    tex_lab[:, :, 0] = np.clip(
-        (tex_lab[:, :, 0] - t_mean) / t_std * o_std + o_mean, 0, 255
+    # ── Transfer lighting di flat space ─────────────────────────────────────
+    # Hitung statistik dari seluruh floor_flat (sudah di-crop, tidak ada area hitam)
+    fl  = cv2.cvtColor(floor_flat, cv2.COLOR_BGR2LAB).astype(np.float32)
+    tl_ = cv2.cvtColor(tex_flat,   cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    # Sesuaikan hanya L channel
+    fl_L_mean = fl[:,:,0].mean()
+    fl_L_std  = fl[:,:,0].std() + 1e-6
+    tl_L_mean = tl_[:,:,0].mean()
+    tl_L_std  = tl_[:,:,0].std() + 1e-6
+
+    tl_[:,:,0] = np.clip(
+        (tl_[:,:,0] - tl_L_mean) / tl_L_std * fl_L_std + fl_L_mean,
+        0, 255
     )
-    tex_lab[:, :, 1] = np.clip(tex_lab[:, :, 1], 0, 255)  # biarkan chroma asli
-    tex_lab[:, :, 2] = np.clip(tex_lab[:, :, 2], 0, 255)
-    tex_lit = cv2.cvtColor(tex_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-    if tex_lit.min() < 0 or tex_lit.max() > 255:
-        tex_lit = tex_warped.copy()
+    # Chroma: pertahankan texture asli sepenuhnya
+    tex_lit_flat = cv2.cvtColor(tl_.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-    result       = img.copy()
-    result[area] = tex_lit[area]
-    mid = len(ys) // 2
+    # ── Warp texture kembali ke perspektif ──────────────────────────────────
+    M_to_persp     = cv2.getPerspectiveTransform(flat_pts, quad)
+    texture_warped = cv2.warpPerspective(tex_lit_flat, M_to_persp, (W, H))
 
+    # Cek apakah warp berhasil — jika tidak, fallback ke flat mapping
+    ys_mid, xs_mid = ys[len(ys)//2], xs[len(xs)//2]
+    if tuple(texture_warped[ys_mid, xs_mid]) == (0, 0, 0):
+        # Fallback: remap flat langsung
+        tex_full = tile_texture(tex_bgr, W, H, tile_size)
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x_min, x_max = int(xs.min()), int(xs.max())
+        fh = max(y_max - y_min, 1)
+        fw = max(x_max - x_min, 1)
+        yy, xx   = np.mgrid[0:H, 0:W].astype(np.float32)
+        map_x    = np.clip((xx - x_min) / fw, 0, 1) * (W - 1)
+        map_y    = np.clip((yy - y_min) / fh, 0, 1) * (H - 1)
+        tex_full_warped = cv2.remap(tex_full,
+                                    map_x.astype(np.float32),
+                                    map_y.astype(np.float32),
+                                    cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        # Transfer lighting untuk fallback
+        fl2  = cv2.cvtColor(img,            cv2.COLOR_BGR2LAB).astype(np.float32)
+        tl2  = cv2.cvtColor(tex_full_warped, cv2.COLOR_BGR2LAB).astype(np.float32)
+        o_m  = fl2[:,:,0][area].mean()
+        o_s  = fl2[:,:,0][area].std() + 1e-6
+        t_m  = tl2[:,:,0][area].mean()
+        t_s  = tl2[:,:,0][area].std() + 1e-6
+        tl2[:,:,0] = np.clip((tl2[:,:,0] - t_m) / t_s * o_s + o_m, 0, 255)
+        texture_warped = cv2.cvtColor(tl2.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+    # ── Paste texture ke area mask ───────────────────────────────────────────
+    result         = img.copy()
+    result[area]   = texture_warped[area]
+
+    # ── Feather tepi dengan cv2.seamlessClone jika memungkinkan ─────────────
+    # Gunakan addWeighted per-channel — hindari numpy broadcasting
     if feather_radius > 0:
-        k        = feather_radius * 2 + 1
-        st.write(f"ys[mid]={ys[mid]}, xs[mid]={xs[mid]} SEBELUM feather")
+        k       = feather_radius * 2 + 1
+        # Buat alpha mask: blur binary mask → float 0-255
+        alpha   = cv2.GaussianBlur((mask * 255).astype(np.uint8), (k, k), 0)
+        # Blend dengan cv2.addWeighted per channel
+        for c in range(3):
+            a        = alpha.astype(np.float32) / 255.0
+            result[:,:,c] = np.clip(
+                a * result[:,:,c].astype(np.float32) +
+                (1.0 - a) * img[:,:,c].astype(np.float32),
+                0, 255
+            ).astype(np.uint8)
 
-        mask_bin = np.zeros((H, W), dtype=np.float32)
-        mask_bin[ys, xs] = 1.0
-        mask_f   = cv2.GaussianBlur(mask_bin, (k, k), 0)
-        mask_f   = mask_f / (mask_f.max() + 1e-6)
-        a3 = np.dstack([mask_f, mask_f, mask_f]).astype(np.float32)
-
-        r_f = result.astype(np.float32)
-        i_f = img.astype(np.float32)
-
-        inv_a3 = np.ones_like(a3) - a3
-        raw = a3 * r_f + inv_a3 * i_f
-        
-        st.write(f"a3 shape: {a3.shape}")
-        st.write(f"r_f shape: {r_f.shape}")
-        st.write(f"i_f shape: {i_f.shape}")
-        st.write(f"(a3 * r_f) di mid: {(a3 * r_f)[ys[mid], xs[mid]]}")
-        st.write(f"((1-a3) * i_f) di mid: {((1.0 - a3) * i_f)[ys[mid], xs[mid]]}")
-        result = np.clip(raw, 0, 255).astype(np.uint8)
-
-
+    # ── Ambient occlusion ────────────────────────────────────────────────────
     result = _ambient_occlusion(result, mask)
-    st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
-
     return result
-
 
 def _ambient_occlusion(img_bgr, mask, intensity=0.28):
     m255 = (mask > 0).astype(np.uint8) * 255
     ys, xs = np.where(mask > 0)
     if len(ys) == 0:
         return img_bgr
-
     fh = int(ys.max() - ys.min())
     fw = int(xs.max() - xs.min())
     ks = max(int(min(fh, fw) * 0.04), 11)
     if ks % 2 == 0:
         ks += 1
-
     kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
     eroded  = cv2.erode(m255, kernel)
     edge    = cv2.subtract(m255, eroded).astype(np.float32)
-
     bs = ks * 2 - 1
     if bs % 2 == 0:
         bs += 1
@@ -249,13 +294,13 @@ def _ambient_occlusion(img_bgr, mask, intensity=0.28):
     smax = smap.max()
     if smax < 0.01:
         return img_bgr
+    smap = (smap / smax) * (edge > 0).astype(np.float32)
+    # Gunakan per-channel untuk hindari numpy broadcasting issue
+    result = img_bgr.copy().astype(np.float32)
+    for c in range(3):
+        result[:,:,c] = np.clip(result[:,:,c] * (1.0 - intensity * smap), 0, 255)
+    return result.astype(np.uint8)
 
-    smap  = (smap / smax) * (edge > 0).astype(np.float32)
-    s3    = np.stack([smap] * 3, axis=-1)
-    dark  = np.clip(1.0 - intensity * s3, 0.0, 1.0)
-    return np.clip(img_bgr.astype(np.float32) * dark, 0, 255).astype(np.uint8)
-
-# ── HELPER ─────────────────────────────────────────────────────────────────────
 def resize_preview(img_pil, max_side=1280):
     w, h = img_pil.size
     if max(w, h) > max_side:
@@ -263,7 +308,6 @@ def resize_preview(img_pil, max_side=1280):
         img_pil = img_pil.resize((int(w*s), int(h*s)), Image.LANCZOS)
     return img_pil
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("🏠 Floor Texture Replacer")
 st.write("Upload foto ruangan, pilih tekstur lantai, lalu lihat hasilnya.")
 
