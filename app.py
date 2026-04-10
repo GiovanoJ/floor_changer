@@ -197,24 +197,17 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
     mid = len(ys) // 2
 
     if feather_radius > 0:
-        k      = feather_radius * 2 + 1
-        mask_f = cv2.GaussianBlur(mask.astype(np.float32), (k, k), 0)
-        mask_f = mask_f / (mask_f.max() + 1e-6)
-        a3     = np.stack([mask_f] * 3, axis=-1)
-        
-        r_f  = result.astype(np.float32)
-        i_f  = img.astype(np.float32)
-        raw  = a3 * r_f + (1.0 - a3) * i_f
-        
-        st.write(f"a3 di mid: {a3[ys[mid], xs[mid]]}")
-        st.write(f"r_f di mid: {r_f[ys[mid], xs[mid]]}")
-        st.write(f"i_f di mid: {i_f[ys[mid], xs[mid]]}")
-        st.write(f"raw di mid: {raw[ys[mid], xs[mid]]}")
-        
-        result = np.clip(raw, 0, 255).astype(np.uint8)
-        st.write(f"result setelah clip di mid: {result[ys[mid], xs[mid]]}")
+        k        = feather_radius * 2 + 1
+        mask_bin = area.astype(np.float32) 
+        mask_f   = cv2.GaussianBlur(mask_bin, (k, k), 0)
+        mask_f   = mask_f / (mask_f.max() + 1e-6)
+        a3       = np.stack([mask_f] * 3, axis=-1)
 
-   
+        result = np.clip(
+            a3 * result.astype(np.float32) + (1.0 - a3) * img.astype(np.float32),
+            0, 255
+        ).astype(np.uint8)
+
     result = _ambient_occlusion(result, mask)
     st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
 
