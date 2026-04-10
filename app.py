@@ -191,20 +191,9 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
     tex_lit = cv2.cvtColor(tex_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
     if tex_lit.min() < 0 or tex_lit.max() > 255:
         tex_lit = tex_warped.copy()
-    st.write(f"[3] tex_lit: {tex_lit[ys[0], xs[0]]}")
-
-    mid = len(ys) // 2
-    st.write(f"tex_lit di tengah: {tex_lit[ys[mid], xs[mid]]}")
-    st.write(f"tex_warped di tengah: {tex_warped[ys[mid], xs[mid]]}")
-    st.write(f"ys[0]={ys[0]}, xs[0]={xs[0]}")
-    st.write(f"ys[mid]={ys[mid]}, xs[mid]={xs[mid]}")
 
     result       = img.copy()
     result[area] = tex_lit[area]
-    st.write(f"LANGSUNG setelah paste - result[ys[mid], xs[mid]]: {result[ys[mid], xs[mid]]}")
-    st.write(f"id(result): {id(result)}, id(img): {id(img)}")
-    st.write(f"result is img: {result is img}")
-    st.write(f"shares memory: {np.shares_memory(result, img)}")
     mid = len(ys) // 2
 
     if feather_radius > 0:
