@@ -193,6 +193,11 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
         tex_lit = tex_warped.copy()
     st.write(f"[3] tex_lit: {tex_lit[ys[0], xs[0]]}")
 
+    st.write(f"tex_lit di tengah: {tex_lit[ys[mid], xs[mid]]}")
+    st.write(f"tex_warped di tengah: {tex_warped[ys[mid], xs[mid]]}")
+    st.write(f"ys[0]={ys[0]}, xs[0]={xs[0]}")
+    st.write(f"ys[mid]={ys[mid]}, xs[mid]={xs[mid]}")
+    
     result       = img.copy()
     result[area] = tex_lit[area]
     st.write(f"[4] result after paste: {result[ys[0], xs[0]]}")
