@@ -198,6 +198,7 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
 
     if feather_radius > 0:
         k        = feather_radius * 2 + 1
+        st.write(f"result di mid TEPAT sebelum feather: {result[ys[mid], xs[mid]]}")
         mask_bin = np.zeros((H, W), dtype=np.float32)
         mask_bin[ys, xs] = 1.0
         mask_f   = cv2.GaussianBlur(mask_bin, (k, k), 0)
