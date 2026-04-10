@@ -200,17 +200,17 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
         k        = feather_radius * 2 + 1
         mask_bin = np.zeros((H, W), dtype=np.float32)
         mask_bin[ys, xs] = 1.0
-        st.write(f"mask_bin unique: {np.unique(mask_bin)}")
-        st.write(f"mask_bin di mid: {mask_bin[ys[mid], xs[mid]]}")
-        
         mask_f   = cv2.GaussianBlur(mask_bin, (k, k), 0)
+        st.write(f"mask_f min/max: {mask_f.min():.4f}, {mask_f.max():.4f}")
         mask_f   = mask_f / (mask_f.max() + 1e-6)
         a3       = np.stack([mask_f] * 3, axis=-1)
+        st.write(f"a3 di mid: {a3[ys[mid], xs[mid]]}") 
 
         result = np.clip(
             a3 * result.astype(np.float32) + (1.0 - a3) * img.astype(np.float32),
             0, 255
         ).astype(np.uint8)
+        st.write(f"result setelah feather di mid: {result[ys[mid], xs[mid]]}")
 
     result = _ambient_occlusion(result, mask)
     st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
