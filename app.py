@@ -208,13 +208,13 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
 
         r_f = result.astype(np.float32)
         i_f = img.astype(np.float32)
-        st.write(f"ys[mid]={ys[mid]}, xs[mid]={xs[mid]} DALAM feather")
-        st.write(f"r_f di mid: {r_f[ys[mid], xs[mid]]}")
-        st.write(f"a3 di mid: {a3[ys[mid], xs[mid]]}")
         raw = a3 * r_f + (1.0 - a3) * i_f
-        st.write(f"raw di mid: {raw[ys[mid], xs[mid]]}")
+        st.write(f"r_f dtype: {r_f.dtype}")
+        st.write(f"i_f dtype: {i_f.dtype}")  
+        st.write(f"a3 dtype: {a3.dtype}")
+        st.write(f"r_f.flags: {r_f.flags['C_CONTIGUOUS']}")
         result = np.clip(raw, 0, 255).astype(np.uint8)
-        st.write(f"result setelah clip di mid: {result[ys[mid], xs[mid]]}")
+
 
     result = _ambient_occlusion(result, mask)
     st.write(f"[6] result after AO: {result[ys[0], xs[0]]}")
