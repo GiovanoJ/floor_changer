@@ -213,7 +213,7 @@ def apply_texture(img_bgr, mask, tex_bgr, tile_size=TEXTURE_TILE_SIZE, feather_r
         st.write(f"r_f shape: {r_f.shape}")
         st.write(f"i_f shape: {i_f.shape}")
         st.write(f"(a3 * r_f) di mid: {(a3 * r_f)[ys[mid], xs[mid]]}")
-        st.write(f"((1-a3) * i_f) di mid: {((1.0 - a3) * i_f)[ys[mid], xs[mid]]}"
+        st.write(f"((1-a3) * i_f) di mid: {((1.0 - a3) * i_f)[ys[mid], xs[mid]]}")
         result = np.clip(raw, 0, 255).astype(np.uint8)
 
 
